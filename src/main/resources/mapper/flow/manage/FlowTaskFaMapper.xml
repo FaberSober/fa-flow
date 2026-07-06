@@ -284,7 +284,7 @@
     
     <!-- 查询已审批任务数量 -->
     <select id="countAudited" resultType="java.lang.Integer">
-        SELECT COUNT(DISTINCT ht.id)
+        SELECT COUNT(DISTINCT ht.instance_id)
         FROM flw_his_task ht 
         LEFT JOIN flw_his_task_actor hta ON ht.id = hta.task_id
         WHERE hta.actor_id = #{actorId}
