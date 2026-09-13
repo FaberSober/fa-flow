@@ -1,5 +1,7 @@
--- update flowlong to 1.2.6
--- FlowLong 1.2.6: rename actor extension columns and remove actor task foreign keys.
+-- ------------------------- info -------------------------
+-- @@ver: 1_000_004
+-- @@info: sync flowlong to 1.2.6
+-- ------------------------- info -------------------------
 
 SET @fa_flowlong_his_task_actor_ext_sql = (
     SELECT IF(
