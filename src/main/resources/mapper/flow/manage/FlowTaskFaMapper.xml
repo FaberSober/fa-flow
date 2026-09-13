@@ -117,7 +117,12 @@
             </if>
             <!-- 待认领任务的参与者类型为角色(1)或部门(2) -->
             AND  (
-                (ta.actor_type = 1 AND ta.actor_id IN (SELECT rur.role_id from base_rbac_user_role rur WHERE rur.deleted = FALSE AND rur.user_id = #{query.actorId}))
+                (ta.actor_type = 1 AND ta.actor_id IN (SELECT
+                    <choose>
+                        <when test="_databaseId == 'postgre'">CAST(rur.role_id AS VARCHAR)</when>
+                        <otherwise>rur.role_id</otherwise>
+                    </choose>
+                    from base_rbac_user_role rur WHERE rur.deleted = FALSE AND rur.user_id = #{query.actorId}))
                 OR
                 (ta.actor_type = 2 AND ta.actor_id = (SELECT u.department_id from base_user u WHERE u.deleted = FALSE AND u.id = #{query.actorId}))
             )
@@ -276,7 +281,12 @@
         WHERE 1=1
         <!-- 待认领任务的参与者类型为角色(1)或部门(2) -->
         AND  (
-            (ta.actor_type = 1 AND ta.actor_id IN (SELECT rur.role_id from base_rbac_user_role rur WHERE rur.deleted = FALSE AND rur.user_id = #{actorId}))
+            (ta.actor_type = 1 AND ta.actor_id IN (SELECT
+                <choose>
+                    <when test="_databaseId == 'postgre'">CAST(rur.role_id AS VARCHAR)</when>
+                    <otherwise>rur.role_id</otherwise>
+                </choose>
+                from base_rbac_user_role rur WHERE rur.deleted = FALSE AND rur.user_id = #{actorId}))
             OR
             (ta.actor_type = 2 AND ta.actor_id = (SELECT u.department_id from base_user u WHERE u.deleted = FALSE AND u.id = #{actorId}))
         )

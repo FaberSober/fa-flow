@@ -69,6 +69,7 @@ public class FlowProcess extends BaseDelEntity {
     private Integer useScope;
 
     @ExcelProperty("流程状态 0，不可用 1，可用 2，历史版本")
+    @SqlEquals
     private Integer processState;
 
     @ExcelProperty("流程模型定义JSON内容")
