@@ -46,8 +46,7 @@ public class FlowProcessController extends BaseController<FlowProcessBiz, FlowPr
     @RequestMapping(value = "/publish", method = RequestMethod.POST)
     @ResponseBody
     public Ret<FlowProcess> publish(@Validated(value = Vg.Crud.C.class) @RequestBody FlowProcess entity) {
-        baseBiz.publish(entity);
-        return ok(entity);
+        return ok(baseBiz.publish(entity));
     }
 
     @FaLogOpr(value = "发起流程", crud = LogCrudEnum.C)

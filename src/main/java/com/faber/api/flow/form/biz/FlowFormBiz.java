@@ -580,6 +580,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
      * @param formDataId
      * @param flowInstanceId
      */
+    @Transactional(rollbackFor = Exception.class)
     public void updateDataFlowInstanceId(Integer formId, Long formDataId, Long flowInstanceId) {
         try {
             // 获取formId的配置
@@ -602,32 +603,36 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
             }
 
             // 检查是否有flow_instance_id字段
-            boolean hasFlowInstanceIdField = tableInfo.getColumns().stream()
-                    .anyMatch(column -> "flow_instance_id".equals(column.getField()));
+            boolean hasFlowInstanceIdField = tableInfo.getColumns() != null && tableInfo.getColumns().stream()
+                    .anyMatch(column -> "flow_instance_id".equalsIgnoreCase(column.getField()));
 
-            // 如果有，更新为flowInstanceId
-            if (hasFlowInstanceIdField) {
-                StringBuilder sql = new StringBuilder("UPDATE ").append(quoteTable(tableName))
-                        .append(" SET ").append(quoteColumn("flow_instance_id")).append(" = ?, ")
-                        .append(quoteColumn("upd_time")).append(" = CURRENT_TIMESTAMP, ")
-                        .append(quoteColumn("upd_user")).append(" = ?")
-                        .append(" WHERE ").append(quoteColumn("id")).append(" = ? AND ")
-                        .append(quoteColumn("deleted")).append(" = false");
-                List<Object> params = new ArrayList<>(Arrays.asList(flowInstanceId, getCurrentUserId(), recordId));
-                appendTenantPredicate(sql, params, quoteColumn("tenant_id"), tenantId);
-
-                int affectedRows;
-                Connection conn = DataSourceUtils.getConnection(dataSource);
-                try {
-                    affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql.toString(), params);
-                } finally {
-                    DataSourceUtils.releaseConnection(conn, dataSource);
-                }
-                if (affectedRows == 0) {
-                    throw new BuzzException("数据不存在或已被删除，id=" + formDataId);
-                }
+            if (!hasFlowInstanceIdField) {
+                throw new BuzzException("业务主表缺少 flow_instance_id 字段，无法绑定流程实例");
             }
-            // 如果没有flow_process_id字段，不更新，不抛出异常
+
+            // 只允许首次绑定，或重复绑定同一实例；禁止覆盖其他流程实例。
+            StringBuilder sql = new StringBuilder("UPDATE ").append(quoteTable(tableName))
+                    .append(" SET ").append(quoteColumn("flow_instance_id")).append(" = ?, ")
+                    .append(quoteColumn("upd_time")).append(" = CURRENT_TIMESTAMP, ")
+                    .append(quoteColumn("upd_user")).append(" = ?")
+                    .append(" WHERE ").append(quoteColumn("id")).append(" = ? AND ")
+                    .append(quoteColumn("deleted")).append(" = false AND (")
+                    .append(quoteColumn("flow_instance_id")).append(" IS NULL OR ")
+                    .append(quoteColumn("flow_instance_id")).append(" = ?)");
+            List<Object> params = new ArrayList<>(Arrays.asList(
+                    flowInstanceId, getCurrentUserId(), recordId, flowInstanceId));
+            appendTenantPredicate(sql, params, quoteColumn("tenant_id"), tenantId);
+
+            int affectedRows;
+            Connection conn = DataSourceUtils.getConnection(dataSource);
+            try {
+                affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql.toString(), params);
+            } finally {
+                DataSourceUtils.releaseConnection(conn, dataSource);
+            }
+            if (affectedRows == 0) {
+                throw new BuzzException("业务数据不存在、已删除或已绑定其他流程实例，id=" + formDataId);
+            }
         } catch (SQLException e) {
             throw new BuzzException("更新业务数据流程ID失败: " + e.getMessage());
         }
