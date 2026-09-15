@@ -22,6 +22,7 @@ import com.faber.api.flow.form.vo.ret.TableInfoVo;
 import com.faber.core.annotation.FaLogBiz;
 import com.faber.core.annotation.FaLogOpr;
 import com.faber.core.annotation.LogNoRet;
+import com.faber.core.config.annotation.Permission;
 import com.faber.core.enums.LogCrudEnum;
 import com.faber.core.vo.msg.Ret;
 import com.faber.core.vo.msg.TableRet;
@@ -44,6 +45,7 @@ public class FlowFormController extends BaseController<FlowFormBiz, FlowForm, In
 
     
     @FaLogOpr(value = "新增主表", crud = LogCrudEnum.C)
+    @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/createFormTable", method = RequestMethod.POST)
     @ResponseBody
     public Ret<CreateFormTableReqVo> createFormTable(@Validated @RequestBody CreateFormTableReqVo reqVo) throws SQLException {
@@ -52,6 +54,7 @@ public class FlowFormController extends BaseController<FlowFormBiz, FlowForm, In
     }
 
     @FaLogOpr(value = "查询表结构", crud = LogCrudEnum.C)
+    @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/queryTableStructure", method = RequestMethod.POST)
     @ResponseBody
     public Ret<TableInfoVo> queryTableStructure(@RequestBody Map<String, Object> reqVo) throws SQLException {
@@ -61,25 +64,28 @@ public class FlowFormController extends BaseController<FlowFormBiz, FlowForm, In
     }
 
     @FaLogOpr(value = "新建列", crud = LogCrudEnum.C)
+    @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/createColumn", method = RequestMethod.POST)
     @ResponseBody
-    public Ret<Boolean> createColumn(@RequestBody CreateColumnReqVo reqVo) throws SQLException {
+    public Ret<Boolean> createColumn(@Validated @RequestBody CreateColumnReqVo reqVo) throws SQLException {
         baseBiz.createColumn(reqVo);
         return ok();
     }
 
     @FaLogOpr(value = "更新列", crud = LogCrudEnum.C)
+    @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/updateColumn", method = RequestMethod.POST)
     @ResponseBody
-    public Ret<Boolean> updateColumn(@RequestBody CreateColumnReqVo reqVo) throws SQLException {
+    public Ret<Boolean> updateColumn(@Validated @RequestBody CreateColumnReqVo reqVo) throws SQLException {
         baseBiz.updateColumn(reqVo);
         return ok();
     }
 
     @FaLogOpr(value = "删除列", crud = LogCrudEnum.C)
+    @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/deleteColumn", method = RequestMethod.POST)
     @ResponseBody
-    public Ret<Boolean> deleteColumn(@RequestBody DeleteColumnReqVo reqVo) throws SQLException {
+    public Ret<Boolean> deleteColumn(@Validated @RequestBody DeleteColumnReqVo reqVo) throws SQLException {
         baseBiz.deleteColumn(reqVo);
         return ok();
     }

@@ -2,7 +2,7 @@ package com.faber.api.flow.form.mapper;
 
 import com.faber.core.config.mybatis.base.FaBaseMapper;
 
-import io.lettuce.core.dynamic.annotation.Param;
+import org.apache.ibatis.annotations.Param;
 
 import java.util.List;
 import java.util.Map;
@@ -23,6 +23,4 @@ public interface FlowFormMapper extends FaBaseMapper<FlowForm> {
     
     String getTableComment(@Param("tableName") String tableName);
 
-    List<Map<String, Object>> selectByDynamicSql(@Param("sql") String sql);
-	
 }

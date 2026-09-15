@@ -4,7 +4,9 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -12,6 +14,7 @@ import javax.sql.DataSource;
 
 import org.springframework.stereotype.Service;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.faber.api.flow.form.entity.FlowForm;
 import com.faber.api.flow.form.entity.FlowFormTable;
 import com.faber.api.flow.form.mapper.FlowFormMapper;
@@ -29,18 +32,15 @@ import com.faber.core.exception.BuzzException;
 import com.faber.core.service.FaFlowService;
 import com.faber.core.vo.msg.TableRet;
 import com.faber.core.vo.query.QueryParams;
+import com.faber.core.vo.query.Sorter;
 import com.faber.core.vo.utils.FaOption;
 import com.faber.core.web.biz.BaseBiz;
-import com.github.pagehelper.PageHelper;
-import com.github.pagehelper.PageInfo;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.db.meta.MetaUtil;
 import cn.hutool.db.meta.Table;
-import cn.hutool.db.sql.SqlExecutor;
 import cn.hutool.json.JSONUtil;
 import jakarta.annotation.Resource;
-import lombok.Cleanup;
 
 /**
  * FLOW-流程表单
@@ -56,8 +56,22 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
     @Resource FlowFormTableBiz flowFormTableBiz;
     @Resource FlowCatagoryBiz flowCatagoryBiz;
 
-    private static final List<String> DATA_TYPES_LENGTH = List.of("varchar", "int", "bigint");
-    private static final List<String> DATA_TYPES_PRECISION = List.of("decimal", "numeric");
+    private static final Set<String> DATA_TYPES_LENGTH = Set.of(
+            "varchar", "char", "varbinary", "binary", "int", "bigint",
+            "tinyint", "smallint", "mediumint");
+    private static final Set<String> DATA_TYPES_PRECISION = Set.of("decimal", "numeric");
+    private static final Set<String> ALLOWED_DATA_TYPES = Set.of(
+            "varchar", "char", "varbinary", "binary", "int", "bigint", "tinyint",
+            "smallint", "mediumint", "decimal", "numeric", "float", "double", "text",
+            "datetime", "date", "timestamp", "json");
+    private static final Set<String> SYSTEM_FIELDS = Set.of(
+            "id", "tenant_id", "flow_instance_id", "crt_time", "crt_user",
+            "upd_time", "upd_user", "deleted");
+    private static final int MAX_DDL_TEXT_LENGTH = 255;
+    private static final int MAX_QUERY_VALUE_LENGTH = 1000;
+    private static final int MAX_QUERY_CONDITIONS = 50;
+    private static final int MAX_PAGE_SIZE = 500;
+    private static final int MAX_BATCH_SIZE = 1000;
 
     @Override
     public void decorateOne(FlowForm i) {
@@ -68,16 +82,13 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
     }
 
     public void createFormTable(CreateFormTableReqVo reqVo) throws SQLException {
-        // 校验表名必须以ff_开头
-        String tableName = reqVo.getTableName();
+        String tableName = FlowFormSqlUtils.requireTableName(reqVo.getTableName());
         String comment = reqVo.getComment();
-        if (tableName == null || !tableName.startsWith("ff_")) {
-            throw new IllegalArgumentException("表名必须以ff_开头");
-        }
+        validateDdlText(comment, "表注释");
 
         // 创建基础表
-            String createTableSql = String.format(
-                "CREATE TABLE `%s` (\n" +
+        String createTableSql = String.format(
+                "CREATE TABLE %s (\n" +
                 "  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT 'ID',\n" +
                 "  `flow_instance_id` bigint(20) DEFAULT NULL COMMENT '流程实例ID',\n" +
                 "  `tenant_id` bigint(20) DEFAULT NULL COMMENT '租户ID',\n" +
@@ -87,16 +98,16 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 "  `upd_user` varchar(32) DEFAULT NULL COMMENT '更新用户ID',\n" +
                 "  `deleted` tinyint(1) NOT NULL DEFAULT '0' COMMENT '是否删除',\n" +
                 "  PRIMARY KEY (`id`)\n" +
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='%s';",
-                tableName,
-                comment == null ? "" : comment.replace("'", "''")
-            );
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT=%s",
+                FlowFormSqlUtils.quoteIdentifier(tableName, "表名"),
+                FlowFormSqlUtils.quoteDdlLiteral(comment == null ? "" : comment, "表注释")
+        );
 
-        @Cleanup Connection conn = dataSource.getConnection();
-        SqlExecutor.execute(conn, createTableSql);
+        FlowFormSqlUtils.executeDdl(dataSource, createTableSql);
     }
 
     public TableInfoVo queryTableStructure(String tableName) throws SQLException {
+        tableName = FlowFormSqlUtils.requireTableName(tableName);
         TableInfoVo tableInfo = new TableInfoVo();
         tableInfo.setTableName(tableName);
 
@@ -150,94 +161,49 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
     }
 
     public void createColumn(CreateColumnReqVo reqVo) throws SQLException {
-        String tableName = reqVo.getTableName();
+        String tableName = requireManagedTableName(reqVo.getTableName());
         TableColumnVo column = reqVo.getColumn();
-
-        // 校验表名必须以ff_开头
-        if (tableName == null || !tableName.startsWith("ff_")) {
-            throw new IllegalArgumentException("表名必须以ff_开头");
-        }
+        ensureTableExists(tableName);
+        String columnName = validateMutableColumn(column);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("ALTER TABLE `").append(tableName).append("` ADD COLUMN `").append(column.getField()).append("` ");
-        
-        if (DATA_TYPES_LENGTH.contains(column.getDataType()) && column.getLength() != null) {
-            sb.append(column.getDataType()).append("(").append(column.getLength()).append(") ");
-        } else if (DATA_TYPES_PRECISION.contains(column.getDataType()) && column.getPrecision() != null && column.getScale() != null) {
-            sb.append(column.getDataType()).append("(").append(column.getPrecision()).append(",").append(column.getScale()).append(") ");
-        } else {
-            sb.append(column.getDataType()).append(" ");
-        }
+        sb.append("ALTER TABLE ")
+                .append(FlowFormSqlUtils.quoteIdentifier(tableName, "表名"))
+                .append(" ADD COLUMN ")
+                .append(FlowFormSqlUtils.quoteIdentifier(columnName, "字段名"))
+                .append(' ')
+                .append(buildColumnDefinition(column));
 
-        if ("NO".equalsIgnoreCase(column.getNullable())) {
-            sb.append("NOT NULL ");
-        } else {
-            sb.append("NULL ");
-        }
-
-        if (column.getDefaultValue() != null) {
-            sb.append("DEFAULT '").append(column.getDefaultValue()).append("' ");
-        }
-
-        if (column.getComment() != null) {
-            sb.append("COMMENT '").append(column.getComment()).append("' ");
-        }
-        sb.append(";");
-
-        String sql = sb.toString();
-
-        @Cleanup Connection conn = dataSource.getConnection();
-        SqlExecutor.execute(conn, sql);
+        FlowFormSqlUtils.executeDdl(dataSource, sb.toString());
     }
 
 
     public void updateColumn(CreateColumnReqVo reqVo) throws SQLException {
-        String tableName = reqVo.getTableName();
+        String tableName = requireManagedTableName(reqVo.getTableName());
         TableColumnVo column = reqVo.getColumn();
-
-        // 校验表名必须以ff_开头
-        if (tableName == null || !tableName.startsWith("ff_")) {
-            throw new IllegalArgumentException("表名必须以ff_开头");
-        }
+        ensureTableExists(tableName);
+        String columnName = validateMutableColumn(column);
         StringBuilder sb = new StringBuilder();
-        sb.append("ALTER TABLE `").append(tableName).append("` MODIFY COLUMN `").append(column.getField()).append("` ");
-        if (DATA_TYPES_LENGTH.contains(column.getDataType()) && column.getLength() != null) {
-            sb.append(column.getDataType()).append("(").append(column.getLength()).append(") ");
-        } else if (DATA_TYPES_PRECISION.contains(column.getDataType()) && column.getPrecision() != null && column.getScale() != null) {
-            sb.append(column.getDataType()).append("(").append(column.getPrecision()).append(",").append(column.getScale()).append(") ");
-        } else {
-            sb.append(column.getDataType()).append(" ");
-        }
-        if ("NO".equalsIgnoreCase(column.getNullable())) {
-            sb.append("NOT NULL ");
-        } else {
-            sb.append("NULL ");
-        }
-        if (column.getDefaultValue() != null) {
-            sb.append("DEFAULT '").append(column.getDefaultValue()).append("' ");
-        }
-        if (column.getComment() != null) {
-            sb.append("COMMENT '").append(column.getComment()).append("' ");
-        }
-        sb.append(";");
-        String sql = sb.toString();
-        @Cleanup Connection conn = dataSource.getConnection();
-        SqlExecutor.execute(conn, sql);
+        sb.append("ALTER TABLE ")
+                .append(FlowFormSqlUtils.quoteIdentifier(tableName, "表名"))
+                .append(" MODIFY COLUMN ")
+                .append(FlowFormSqlUtils.quoteIdentifier(columnName, "字段名"))
+                .append(' ')
+                .append(buildColumnDefinition(column));
+        FlowFormSqlUtils.executeDdl(dataSource, sb.toString());
     }
 
     public void deleteColumn(com.faber.api.flow.form.vo.req.DeleteColumnReqVo reqVo) throws SQLException {
-        String tableName = reqVo.getTableName();
-        String columnName = reqVo.getColumn();
-
-        // 校验表名必须以ff_开头
-        if (tableName == null || !tableName.startsWith("ff_")) {
-            throw new IllegalArgumentException("表名必须以ff_开头");
+        String tableName = requireManagedTableName(reqVo.getTableName());
+        ensureTableExists(tableName);
+        String columnName = FlowFormSqlUtils.requireIdentifier(reqVo.getColumn(), "字段名");
+        if (SYSTEM_FIELDS.contains(columnName.toLowerCase(Locale.ROOT))) {
+            throw new BuzzException("系统字段不允许删除: " + columnName);
         }
 
-        String sql = String.format("ALTER TABLE `%s` DROP COLUMN `%s`;", tableName, columnName);
-
-        @Cleanup Connection conn = dataSource.getConnection();
-        SqlExecutor.execute(conn, sql);
+        String sql = "ALTER TABLE " + FlowFormSqlUtils.quoteIdentifier(tableName, "表名")
+                + " DROP COLUMN " + FlowFormSqlUtils.quoteIdentifier(columnName, "字段名");
+        FlowFormSqlUtils.executeDdl(dataSource, sql);
     }
 
     public SaveFormDataReqVo saveFormData(SaveFormDataReqVo reqVo) throws SQLException {
@@ -255,6 +221,9 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         if (flowForm == null) {
             throw new BuzzException("表单不存在,formId=" + formId);
         }
+        if (formData == null) {
+            throw new BuzzException("表单数据不能为空");
+        }
 
         // 检查是否有 id 字段
         if (!formData.containsKey("id")) {
@@ -265,97 +234,90 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         Map<String, Object> configMap = flowForm.getConfig();
         FlowFormConfig flowFormConfig = JSONUtil.toBean(JSONUtil.toJsonStr(configMap), FlowFormConfig.class);
 
-        // 获取数据配置
-        FlowFormDataConfig dataConfig = flowForm.getDataConfig();
+        // 获取并校验主表配置。表名来自已保存的流程表单元数据，不信任请求中的表名。
+        FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
 
         // 更新主表数据
-        @Cleanup Connection conn = dataSource.getConnection();
-        Long mainTableId = update(conn, dataConfig.getMain(), formData);
+        try (Connection conn = dataSource.getConnection()) {
+            Long mainTableId = update(conn, mainTable, formData);
 
-        // 更新子表数据
-        List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
-        for (FlowFormItem item : subTableItems) {
-            String subTableName = item.getSubtable_tableName();
-            List<Map<String, Object>> tableData = (List<Map<String, Object>>) formData.get(item.getName());
-            
-            // 从数据库查找子表配置
-            FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
-            
-            if (flowFormTable == null) {
-                throw new BuzzException("子表配置不存在: " + subTableName);
-            }
-            
-            String fkField = flowFormTable.getForeignKey();
-            FlowFormDataConfig.Table tableConfig = flowFormTable.getDataConfig();
-            
-            // 跳过空数据
-            if (tableData == null || tableData.isEmpty()) {
-                // 删除所有子表数据（没有传数据表示清空）
-                String deleteSql = String.format(
-                    "UPDATE `%s` SET deleted = true, upd_time = CURRENT_TIMESTAMP, upd_user = '%s' WHERE %s = %d AND deleted = false",
-                    tableConfig.getTableName(),
-                    getCurrentUserId(),
-                    fkField,
-                    mainTableId
-                );
-                SqlExecutor.execute(conn, deleteSql);
-                continue;
-            }
+            // 更新子表数据
+            List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
+            for (FlowFormItem item : subTableItems) {
+                String subTableName = item.getSubtable_tableName();
+                List<Map<String, Object>> tableData = (List<Map<String, Object>>) formData.get(item.getName());
 
-            // 收集所有有id的数据和没有id的数据
-            List<Long> updateIds = new ArrayList<>();
-            List<Map<String, Object>> insertDataList = new ArrayList<>();
-            List<Map<String, Object>> updateDataList = new ArrayList<>();
-            
-            for (Map<String, Object> rowData : tableData) {
-                // 清理前端临时字段（以_开头的字段）
-                rowData.entrySet().removeIf(entry -> entry.getKey().startsWith("_"));
-                
-                Object idObj = rowData.get("id");
-                if (idObj != null) {
-                    // 有id，需要更新
-                    Long id = Long.parseLong(idObj.toString());
-                    updateIds.add(id);
-                    updateDataList.add(rowData);
-                } else {
-                    // 没有id，需要插入
-                    insertDataList.add(rowData);
+                // 从数据库查找子表配置
+                FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
+
+                if (flowFormTable == null) {
+                    throw new BuzzException("子表配置不存在: " + subTableName);
                 }
-            }
-            
-            // 1. 删除不在更新列表中的数据
-            String deleteSql;
-            if (!updateIds.isEmpty()) {
-                String idsStr = updateIds.stream().map(String::valueOf).reduce((a, b) -> a + "," + b).orElse("");
-                deleteSql = String.format(
-                    "UPDATE `%s` SET deleted = true, upd_time = CURRENT_TIMESTAMP, upd_user = '%s' WHERE %s = %d AND id NOT IN (%s) AND deleted = false",
-                    tableConfig.getTableName(),
-                    getCurrentUserId(),
-                    fkField,
-                    mainTableId,
-                    idsStr
-                );
-            } else {
-                // 没有要更新的数据，删除所有旧数据
-                deleteSql = String.format(
-                    "UPDATE `%s` SET deleted = true, upd_time = CURRENT_TIMESTAMP, upd_user = '%s' WHERE %s = %d AND deleted = false",
-                    tableConfig.getTableName(),
-                    getCurrentUserId(),
-                    fkField,
-                    mainTableId
-                );
-            }
-            SqlExecutor.execute(conn, deleteSql);
-            
-            // 2. 更新已有数据
-            for (Map<String, Object> rowData : updateDataList) {
-                update(conn, tableConfig, rowData);
-            }
-            
-            // 3. 插入新数据
-            for (Map<String, Object> rowData : insertDataList) {
-                rowData.put(fkField, mainTableId);
-                save(conn, tableConfig, rowData);
+
+                String fkField = FlowFormSqlUtils.requireIdentifier(flowFormTable.getForeignKey(), "子表外键字段");
+                FlowFormDataConfig.Table tableConfig = validateTableConfig(flowFormTable.getDataConfig(), "子表配置");
+
+                // 跳过空数据
+                if (tableData == null || tableData.isEmpty()) {
+                    // 删除所有子表数据（没有传数据表示清空）
+                    FlowFormSqlUtils.executeUpdate(conn,
+                            "UPDATE " + quoteTable(tableConfig.getTableName())
+                                    + " SET `deleted` = ?, `upd_time` = CURRENT_TIMESTAMP, `upd_user` = ?"
+                                    + " WHERE " + quoteColumn(fkField) + " = ? AND `deleted` = ?",
+                            Arrays.asList(true, getCurrentUserId(), mainTableId, false));
+                    continue;
+                }
+
+                // 收集所有有id的数据和没有id的数据
+                List<Long> updateIds = new ArrayList<>();
+                List<Map<String, Object>> insertDataList = new ArrayList<>();
+                List<Map<String, Object>> updateDataList = new ArrayList<>();
+
+                for (Map<String, Object> rowData : tableData) {
+                    if (rowData == null) {
+                        throw new BuzzException("子表数据行不能为空");
+                    }
+                    // 清理前端临时字段（以_开头的字段）
+                    rowData.entrySet().removeIf(entry -> entry.getKey() != null && entry.getKey().startsWith("_"));
+
+                    Object idObj = rowData.get("id");
+                    if (idObj != null) {
+                        // 有id，需要更新
+                        Long id = parseRecordId(idObj);
+                        updateIds.add(id);
+                        updateDataList.add(rowData);
+                    } else {
+                        // 没有id，需要插入
+                        insertDataList.add(rowData);
+                    }
+                }
+
+                // 1. 删除不在更新列表中的数据
+                StringBuilder deleteSql = new StringBuilder()
+                        .append("UPDATE ").append(quoteTable(tableConfig.getTableName()))
+                        .append(" SET `deleted` = ?, `upd_time` = CURRENT_TIMESTAMP, `upd_user` = ?")
+                        .append(" WHERE ").append(quoteColumn(fkField)).append(" = ?");
+                List<Object> deleteParams = new ArrayList<>(Arrays.asList(true, getCurrentUserId(), mainTableId));
+                if (!updateIds.isEmpty()) {
+                    deleteSql.append(" AND `id` NOT IN (")
+                            .append(FlowFormSqlUtils.placeholders(updateIds.size()))
+                            .append(')');
+                    deleteParams.addAll(updateIds);
+                }
+                deleteSql.append(" AND `deleted` = ?");
+                deleteParams.add(false);
+                FlowFormSqlUtils.executeUpdate(conn, deleteSql.toString(), deleteParams);
+
+                // 2. 更新已有数据
+                for (Map<String, Object> rowData : updateDataList) {
+                    update(conn, tableConfig, rowData);
+                }
+
+                // 3. 插入新数据
+                for (Map<String, Object> rowData : insertDataList) {
+                    rowData.put(fkField, mainTableId);
+                    save(conn, tableConfig, rowData);
+                }
             }
         }
 
@@ -367,51 +329,51 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         if (flowForm == null) {
             throw new BuzzException("表单不存在，formId=" + formId);
         }
+        if (formData == null) {
+            throw new BuzzException("表单数据不能为空");
+        }
 
         // 解析表单布局，获取子表配置
         Map<String, Object> configMap = flowForm.getConfig();
         FlowFormConfig flowFormConfig = JSONUtil.toBean(JSONUtil.toJsonStr(configMap), FlowFormConfig.class);
 
-        // 拼接保存SQL
-        FlowFormDataConfig dataConfig = flowForm.getDataConfig();
+        // 获取并校验主表配置。表名来自已保存的流程表单元数据，不信任请求中的表名。
+        FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
 
         // 保存主表数据
-        @Cleanup Connection conn = dataSource.getConnection();
-        Long mainTableId = save(conn, dataConfig.getMain(), formData);
+        try (Connection conn = dataSource.getConnection()) {
+            Long mainTableId = save(conn, mainTable, formData);
 
-        // 保存子表数据
-        List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
-        for (FlowFormItem item : subTableItems) {
-            String subTableName = item.getSubtable_tableName();
-            List<Map<String, Object>> tableData = (List<Map<String, Object>>) formData.get(item.getName());
-            
-            // 跳过空数据
-            if (tableData == null || tableData.isEmpty()) {
-                continue;
-            }
-            
-            // 从数据库查找子表配置
-            FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
-            
-            if (flowFormTable == null) {
-                throw new BuzzException("子表配置不存在: " + subTableName);
-            }
-            
-            String fkField = flowFormTable.getForeignKey();
-            FlowFormDataConfig.Table tableConfig = flowFormTable.getDataConfig();
-            
-            // 添加fkField字段
-            for (Map<String, Object> rowData : tableData) {
-                rowData.put(fkField, mainTableId);
-            }
+            // 保存子表数据
+            List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
+            for (FlowFormItem item : subTableItems) {
+                String subTableName = item.getSubtable_tableName();
+                List<Map<String, Object>> tableData = (List<Map<String, Object>>) formData.get(item.getName());
 
-            // 生成批量insert SQL
-            for (Map<String, Object> rowData : tableData) {
-                // 清理前端临时字段（以_开头的字段）
-                rowData.entrySet().removeIf(entry -> entry.getKey().startsWith("_"));
-                
-                rowData.put(fkField, mainTableId);
-                save(conn, tableConfig, rowData);
+                // 跳过空数据
+                if (tableData == null || tableData.isEmpty()) {
+                    continue;
+                }
+
+                // 从数据库查找子表配置
+                FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
+
+                if (flowFormTable == null) {
+                    throw new BuzzException("子表配置不存在: " + subTableName);
+                }
+
+                String fkField = FlowFormSqlUtils.requireIdentifier(flowFormTable.getForeignKey(), "子表外键字段");
+                FlowFormDataConfig.Table tableConfig = validateTableConfig(flowFormTable.getDataConfig(), "子表配置");
+
+                // 添加fkField字段并生成参数化 insert SQL
+                for (Map<String, Object> rowData : tableData) {
+                    if (rowData == null) {
+                        throw new BuzzException("子表数据行不能为空");
+                    }
+                    rowData.entrySet().removeIf(entry -> entry.getKey() != null && entry.getKey().startsWith("_"));
+                    rowData.put(fkField, mainTableId);
+                    save(conn, tableConfig, rowData);
+                }
             }
         }
 
@@ -430,51 +392,56 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
      * @throws SQLException
      */
     private Long save(Connection conn, FlowFormDataConfig.Table tableConfig, Map<String, Object> data) throws SQLException {
+        validateTableConfig(tableConfig, "表配置");
+        if (data == null) {
+            throw new BuzzException("表单数据不能为空");
+        }
+
         String userId = getCurrentUserId();
         String tableName = tableConfig.getTableName();
-        
-        StringBuilder sqlSb = new StringBuilder();
-        StringBuilder fieldsSb = new StringBuilder();
-        StringBuilder valuesSb = new StringBuilder();
-        
-        sqlSb.append("INSERT INTO `").append(tableName).append("` (");
-        
-        // 处理其他字段
+
+        List<String> fields = new ArrayList<>();
+        List<String> values = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+
         for (FlowFormDataConfig.Column column : tableConfig.getColumns()) {
-            String field = column.getField();
-            
+            String field = FlowFormSqlUtils.requireIdentifier(column.getField(), "字段名");
+
+            // 系统字段由服务端维护，客户端不能覆盖。
+            if (SYSTEM_FIELDS.contains(field.toLowerCase(Locale.ROOT))) {
+                if ("crt_time".equalsIgnoreCase(field) || "upd_time".equalsIgnoreCase(field)) {
+                    fields.add(quoteColumn(field));
+                    values.add("CURRENT_TIMESTAMP");
+                } else if ("crt_user".equalsIgnoreCase(field) || "upd_user".equalsIgnoreCase(field)) {
+                    fields.add(quoteColumn(field));
+                    values.add("?");
+                    params.add(userId);
+                } else if ("deleted".equalsIgnoreCase(field)) {
+                    fields.add(quoteColumn(field));
+                    values.add("?");
+                    params.add(false);
+                }
+                continue;
+            }
+
             if (data.containsKey(field)) {
                 Object value = data.get(field);
-                // 跳过系统字段，这些字段由系统控制
-                if (field.equals("id") || field.equals("deleted") || 
-                    field.equals("crt_time") || field.equals("crt_user") || 
-                    field.equals("upd_time") || field.equals("upd_user")) {
-                    continue;
-                }
-                // 跳过null值的字段，不插入到SQL中
                 if (value != null) {
-                    fieldsSb.append("`").append(field).append("`, ");
-                    valuesSb.append("'").append(value).append("', ");
+                    fields.add(quoteColumn(field));
+                    values.add("?");
+                    params.add(value);
                 }
-            } else if (field.equals("crt_time") || field.equals("upd_time")) {
-                fieldsSb.append("`").append(field).append("`, ");
-                valuesSb.append("CURRENT_TIMESTAMP, ");
-            } else if (field.equals("crt_user") || field.equals("upd_user")) {
-                fieldsSb.append("`").append(field).append("`, ");
-                valuesSb.append("'").append(userId).append("', ");
-            } else if (field.equals("deleted")) {
-                fieldsSb.append("`").append(field).append("`, ");
-                valuesSb.append("false, ");
             }
         }
-        
-        String sql = sqlSb.append(fieldsSb.substring(0, fieldsSb.length() - 2))
-                .append(") VALUES (")
-                .append(valuesSb.substring(0, valuesSb.length() - 2))
-                .append(");")
-                .toString();
-        
-        Long id = SqlExecutor.executeForGeneratedKey(conn, sql);
+
+        if (fields.isEmpty()) {
+            throw new BuzzException("没有可保存的表单字段");
+        }
+
+        String sql = "INSERT INTO " + quoteTable(tableName)
+                + " (" + String.join(", ", fields) + ") VALUES ("
+                + String.join(", ", values) + ")";
+        Long id = FlowFormSqlUtils.executeInsert(conn, sql, params);
         data.put("id", id);
         return id;
     }
@@ -489,55 +456,61 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
      * @throws SQLException
      */
     private Long update(Connection conn, FlowFormDataConfig.Table tableConfig, Map<String, Object> data) throws SQLException {
+        validateTableConfig(tableConfig, "表配置");
+        if (data == null) {
+            throw new BuzzException("表单数据不能为空");
+        }
+
         String userId = getCurrentUserId();
         String tableName = tableConfig.getTableName();
-        
+
         // 获取ID
         Object idObj = data.get("id");
-        if (idObj == null) {
-            throw new BuzzException("更新数据必须包含 id 字段");
-        }
-        Long id = Long.parseLong(idObj.toString());
-        
-        StringBuilder sqlSb = new StringBuilder();
-        StringBuilder setSb = new StringBuilder();
-        
-        sqlSb.append("UPDATE `").append(tableName).append("` SET ");
-        
-        // 处理其他字段
+        Long id = parseRecordId(idObj);
+
+        List<String> assignments = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+
         for (FlowFormDataConfig.Column column : tableConfig.getColumns()) {
-            String field = column.getField();
-            
-            // 跳过id字段和系统字段
-            if (field.equals("id") || field.equals("crt_time") || field.equals("crt_user") || field.equals("deleted")) {
+            String field = FlowFormSqlUtils.requireIdentifier(column.getField(), "字段名");
+
+            if ("upd_time".equalsIgnoreCase(field)) {
+                assignments.add(quoteColumn(field) + " = CURRENT_TIMESTAMP");
                 continue;
             }
-            
+            if ("upd_user".equalsIgnoreCase(field)) {
+                assignments.add(quoteColumn(field) + " = ?");
+                params.add(userId);
+                continue;
+            }
+            if (SYSTEM_FIELDS.contains(field.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+
             if (data.containsKey(field)) {
                 Object value = data.get(field);
                 // 只更新非null值的字段
                 if (value != null) {
-                    setSb.append("`").append(field).append("` = '").append(value).append("', ");
+                    assignments.add(quoteColumn(field) + " = ?");
+                    params.add(value);
                 }
-            } else if (field.equals("upd_time")) {
-                setSb.append("`").append(field).append("` = CURRENT_TIMESTAMP, ");
-            } else if (field.equals("upd_user")) {
-                setSb.append("`").append(field).append("` = '").append(userId).append("', ");
             }
         }
-        
+
         // 确保至少更新 upd_time 和 upd_user
-        if (setSb.length() == 0) {
-            setSb.append("`upd_time` = CURRENT_TIMESTAMP, `upd_user` = '").append(userId).append("', ");
+        if (assignments.stream().noneMatch(item -> item.startsWith(quoteColumn("upd_time")))) {
+            assignments.add(quoteColumn("upd_time") + " = CURRENT_TIMESTAMP");
         }
-        
-        String sql = sqlSb.append(setSb.substring(0, setSb.length() - 2))
-                .append(" WHERE `id` = ").append(id)
-                .append(" AND `deleted` = false;")
-                .toString();
-        
-        int affectedRows = SqlExecutor.execute(conn, sql);
-        
+        if (assignments.stream().noneMatch(item -> item.startsWith(quoteColumn("upd_user")))) {
+            assignments.add(quoteColumn("upd_user") + " = ?");
+            params.add(userId);
+        }
+
+        String sql = "UPDATE " + quoteTable(tableName) + " SET " + String.join(", ", assignments)
+                + " WHERE " + quoteColumn("id") + " = ? AND " + quoteColumn("deleted") + " = false";
+        params.add(id);
+        int affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql, params);
+
         if (affectedRows == 0) {
             throw new BuzzException("数据不存在或已被删除,id=" + id);
         }
@@ -559,17 +532,8 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 throw new BuzzException("表单不存在，formId=" + formId);
             }
 
-            // 获取主表配置
-            FlowFormDataConfig dataConfig = flowForm.getDataConfig();
-            if (dataConfig == null || dataConfig.getMain() == null) {
-                throw new BuzzException("表单数据配置不存在，formId=" + formId);
-            }
-
-            FlowFormDataConfig.Table mainTable = dataConfig.getMain();
+            FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
             String tableName = mainTable.getTableName();
-            if (StrUtil.isEmpty(tableName)) {
-                throw new BuzzException("表单主表名称不存在，formId=" + formId);
-            }
 
             // 判断主表是否有flow_instance_id字段
             TableInfoVo tableInfo = queryTableStructure(tableName);
@@ -583,17 +547,18 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
             // 如果有，更新为flowInstanceId
             if (hasFlowInstanceIdField) {
-                String sql = String.format(
-                        "UPDATE `%s` SET flow_instance_id = %d, upd_time = CURRENT_TIMESTAMP, upd_user = '%s' WHERE id = %d AND deleted = false",
-                        tableName,
-                        flowInstanceId,
-                        getCurrentUserId(),
-                        formDataId
-                );
+                String sql = "UPDATE " + quoteTable(tableName)
+                        + " SET " + quoteColumn("flow_instance_id") + " = ?, "
+                        + quoteColumn("upd_time") + " = CURRENT_TIMESTAMP, "
+                        + quoteColumn("upd_user") + " = ?"
+                        + " WHERE " + quoteColumn("id") + " = ? AND "
+                        + quoteColumn("deleted") + " = false";
 
-                @Cleanup Connection conn = dataSource.getConnection();
-                int affectedRows = SqlExecutor.execute(conn, sql);
-                
+                int affectedRows;
+                try (Connection conn = dataSource.getConnection()) {
+                    affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql,
+                            Arrays.asList(flowInstanceId, getCurrentUserId(), formDataId));
+                }
                 if (affectedRows == 0) {
                     throw new BuzzException("数据不存在或已被删除，id=" + formDataId);
                 }
@@ -610,57 +575,114 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
      * @return
      */
     public TableRet<Map<String, Object>> pageFormData(QueryParams query) {
-        if (query.getFlowFormId() == null) throw new BuzzException("FlowFormId is NULL.");
+        if (query == null || query.getFlowFormId() == null) throw new BuzzException("FlowFormId is NULL.");
+        if (query.getCurrent() < 1) throw new BuzzException("当前页码必须大于0");
+        if (query.getPageSize() < 1 || query.getPageSize() > MAX_PAGE_SIZE) {
+            throw new BuzzException("每页条数必须在1到" + MAX_PAGE_SIZE + "之间");
+        }
         FlowForm flowForm = this.getById(query.getFlowFormId());
         if (flowForm == null) throw new BuzzException("FlowForm Not Found." + query.getFlowFormId());
-        if (StrUtil.isEmpty(flowForm.getTableName())) throw new BuzzException("FlowForm Not Set TableName." + query.getFlowFormId());
+        FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
 
-        // 判断是否有flow_instance_id字段，如果有，sql增加和flw_his_instance的关联查询
-        String tableName = flowForm.getTableName();
-        boolean hasFlowInstanceIdField = false;
-        if (flowForm.getFlowProcessId() != null) {
-            hasFlowInstanceIdField = hasFlowInstanceIdField(tableName);
+        String tableName = mainTable.getTableName();
+        TableInfoVo tableInfo;
+        try {
+            tableInfo = queryTableStructure(tableName);
+        } catch (SQLException e) {
+            throw new BuzzException("查询表结构失败: " + e.getMessage());
+        }
+        if (!Boolean.TRUE.equals(tableInfo.getExist())) {
+            throw new BuzzException("表不存在，tableName=" + tableName);
         }
 
-        StringBuilder sb = new StringBuilder();
-        
-        // 有flow_instance_id字段，使用关联查询
-        sb.append("SELECT t.* ");
+        Set<String> readableFields = new HashSet<>();
+        if (tableInfo.getColumns() != null) {
+            for (TableColumnVo column : tableInfo.getColumns()) {
+                readableFields.add(FlowFormSqlUtils.requireIdentifier(column.getField(), "字段名").toLowerCase(Locale.ROOT));
+            }
+        }
+        boolean hasFlowInstanceIdField = flowForm.getFlowProcessId() != null
+                && readableFields.contains("flow_instance_id");
+
+        StringBuilder fromSql = new StringBuilder(" FROM ")
+                .append(quoteTable(tableName))
+                .append(" t ");
 
         if (hasFlowInstanceIdField) {
-            sb.append(", fhi.current_node_name, fhi.current_node_key, fhi.instance_state ");
+            fromSql.append("LEFT JOIN flw_his_instance fhi ON t.")
+                    .append(quoteColumn("flow_instance_id"))
+                    .append(" = fhi.id ");
         }
 
-        sb.append("FROM " + tableName + " t ");
+        StringBuilder whereSql = new StringBuilder(" WHERE t.")
+                .append(quoteColumn("deleted"))
+                .append(" = false ");
+        List<Object> params = new ArrayList<>();
 
-        if (hasFlowInstanceIdField) {
-            sb.append("LEFT JOIN flw_his_instance fhi ON t.flow_instance_id = fhi.id ");
-        }
-        
-        sb.append("WHERE t.deleted = false ");
-        
-        // 解析where条件（需要加t.前缀）
-        if (!query.getQuery().isEmpty()) {
+        // 只允许查询实际存在于该动态表中的字段，字段名本身不作为值拼接。
+        if (query.getQuery() != null && !query.getQuery().isEmpty()) {
+            if (query.getQuery().size() > MAX_QUERY_CONDITIONS) {
+                throw new BuzzException("查询条件不能超过" + MAX_QUERY_CONDITIONS + "个");
+            }
             for (Map.Entry<String, Object> entry : query.getQuery().entrySet()) {
                 String key = entry.getKey();
                 Object value = entry.getValue();
                 if (value == null) continue;
-                // TODO 支持更多查询操作符
-                // key驼峰转下划线
-                sb.append(" AND t." + key + " LIKE '%" + value.toString() + "%' ");
+                String field = normalizeQueryField(key);
+                if (!readableFields.contains(field.toLowerCase(Locale.ROOT))) {
+                    throw new BuzzException("不允许查询字段: " + key);
+                }
+                String textValue = String.valueOf(value);
+                if (textValue.length() > MAX_QUERY_VALUE_LENGTH) {
+                    throw new BuzzException("查询值长度超过限制");
+                }
+                whereSql.append(" AND t.")
+                        .append(quoteColumn(field))
+                        .append(" LIKE ?");
+                params.add("%" + textValue + "%");
             }
         }
-        
-        // 解析sorter（需要加t.前缀）
-        if (StrUtil.isNotEmpty(query.getSorter())) {
-            sb.append(" ORDER BY t." + query.getSorter() + " ");
+
+        StringBuilder orderSql = new StringBuilder();
+        List<Sorter> sorterList = query.getSorterInfo();
+        if (!sorterList.isEmpty()) {
+            orderSql.append(" ORDER BY ");
+            for (int i = 0; i < sorterList.size(); i++) {
+                Sorter sorter = sorterList.get(i);
+                String field = normalizeQueryField(sorter.getField());
+                if (!readableFields.contains(field.toLowerCase(Locale.ROOT))) {
+                    throw new BuzzException("不允许排序字段: " + sorter.getField());
+                }
+                if (i > 0) {
+                    orderSql.append(", ");
+                }
+                orderSql.append("t.")
+                        .append(quoteColumn(field))
+                        .append(sorter.isAsc() ? " ASC" : " DESC");
+            }
         }
 
-        String sql = sb.toString();
+        String fromWhereSql = fromSql.toString() + whereSql;
+        String countSql = "SELECT COUNT(*)" + fromWhereSql;
+        String selectSql = "SELECT t.*"
+                + (hasFlowInstanceIdField ? ", fhi.current_node_name, fhi.current_node_key, fhi.instance_state " : " ")
+                + fromWhereSql
+                + orderSql
+                + " LIMIT ? OFFSET ?";
 
-        PageInfo<Map<String, Object>> info = PageHelper.startPage(query.getCurrent(), query.getPageSize())
-            .doSelectPageInfo(() -> baseMapper.selectByDynamicSql(sql));
-        return new TableRet<>(info);
+        try (Connection conn = dataSource.getConnection()) {
+            long total = FlowFormSqlUtils.queryForLong(conn, countSql, params);
+            List<Object> pageParams = new ArrayList<>(params);
+            pageParams.add(query.getPageSize());
+            pageParams.add((long) (query.getCurrent() - 1) * query.getPageSize());
+            List<Map<String, Object>> rows = FlowFormSqlUtils.queryForMaps(conn, selectSql, pageParams);
+
+            Page<Map<String, Object>> page = new Page<>(query.getCurrent(), query.getPageSize(), total);
+            page.setRecords(rows);
+            return new TableRet<>(page);
+        } catch (SQLException e) {
+            throw new BuzzException("查询表单数据失败: " + e.getMessage());
+        }
     }
 
     /**
@@ -677,100 +699,53 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
             throw new BuzzException("表单不存在，formId=" + flowFormId);
         }
 
-        FlowFormDataConfig dataConfig = flowForm.getDataConfig();
-        if (dataConfig == null || dataConfig.getMain() == null) {
-            throw new BuzzException("表单数据配置不存在，formId=" + flowFormId);
-        }
-
-        String mainTableName = dataConfig.getMain().getTableName();
-        if (StrUtil.isEmpty(mainTableName)) {
-            throw new BuzzException("表单主表名称不存在，formId=" + flowFormId);
-        }
+        FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
+        String mainTableName = mainTable.getTableName();
+        Long recordId = parseRecordId(id);
 
         // 查询主表数据
-        String sql = String.format(
-            "SELECT * FROM `%s` WHERE id = %s AND deleted = false",
-            mainTableName,
-            id
-        );
+        String sql = "SELECT * FROM " + quoteTable(mainTableName)
+                + " WHERE " + quoteColumn("id") + " = ? AND " + quoteColumn("deleted") + " = false";
 
-        @Cleanup Connection conn = dataSource.getConnection();
-        List<Map<String, Object>> list = SqlExecutor.query(conn, sql, rs -> {
-            List<Map<String, Object>> result = new ArrayList<>();
-            try {
-                int columnCount = rs.getMetaData().getColumnCount();
-                while (rs.next()) {
-                    Map<String, Object> row = new java.util.HashMap<>();
-                    for (int i = 1; i <= columnCount; i++) {
-                        String columnName = rs.getMetaData().getColumnName(i);
-                        Object value = rs.getObject(i);
-                        row.put(columnName, value);
-                    }
-                    result.add(row);
-                }
-            } catch (SQLException e) {
-                throw new RuntimeException(e);
+        try (Connection conn = dataSource.getConnection()) {
+            List<Map<String, Object>> list = FlowFormSqlUtils.queryForMaps(conn, sql, List.of(recordId));
+
+            if (list == null || list.isEmpty()) {
+                throw new BuzzException("数据不存在，id=" + id);
             }
-            return result;
-        });
 
-        if (list == null || list.isEmpty()) {
-            throw new BuzzException("数据不存在，id=" + id);
-        }
+            Map<String, Object> mainData = list.get(0);
 
-        Map<String, Object> mainData = list.get(0);
+            // 解析表单布局，获取子表配置
+            Map<String, Object> configMap = flowForm.getConfig();
+            FlowFormConfig flowFormConfig = JSONUtil.toBean(JSONUtil.toJsonStr(configMap), FlowFormConfig.class);
 
-        // 解析表单布局，获取子表配置
-        Map<String, Object> configMap = flowForm.getConfig();
-        FlowFormConfig flowFormConfig = JSONUtil.toBean(JSONUtil.toJsonStr(configMap), FlowFormConfig.class);
-
-        // 查询子表数据
-        List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
-        for (FlowFormItem item : subTableItems) {
-            String subTableName = item.getSubtable_tableName();
-            
-            // 从数据库查找子表配置
-            FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
-            
-            if (flowFormTable == null) {
-                throw new BuzzException("子表配置不存在: " + subTableName);
-            }
-            
-            String fkField = flowFormTable.getForeignKey();
-            FlowFormDataConfig.Table tableConfig = flowFormTable.getDataConfig();
-            
             // 查询子表数据
-            String subSql = String.format(
-                "SELECT * FROM `%s` WHERE %s = %s AND deleted = false",
-                tableConfig.getTableName(),
-                fkField,
-                id
-            );
-            
-            List<Map<String, Object>> subList = SqlExecutor.query(conn, subSql, rs -> {
-                List<Map<String, Object>> result = new ArrayList<>();
-                try {
-                    int columnCount = rs.getMetaData().getColumnCount();
-                    while (rs.next()) {
-                        Map<String, Object> row = new java.util.HashMap<>();
-                        for (int i = 1; i <= columnCount; i++) {
-                            String columnName = rs.getMetaData().getColumnName(i);
-                            Object value = rs.getObject(i);
-                            row.put(columnName, value);
-                        }
-                        result.add(row);
-                    }
-                } catch (SQLException e) {
-                    throw new RuntimeException(e);
-                }
-                return result;
-            });
-            
-            // 将子表数据添加到主数据中
-            mainData.put(item.getName(), subList);
-        }
+            List<FlowFormItem> subTableItems = flowFormConfig.getAllSubTableItems();
+            for (FlowFormItem item : subTableItems) {
+                String subTableName = item.getSubtable_tableName();
 
-        return mainData;
+                // 从数据库查找子表配置
+                FlowFormTable flowFormTable = flowFormTableBiz.getLinkTable(flowForm.getId(), subTableName);
+
+                if (flowFormTable == null) {
+                    throw new BuzzException("子表配置不存在: " + subTableName);
+                }
+
+                String fkField = FlowFormSqlUtils.requireIdentifier(flowFormTable.getForeignKey(), "子表外键字段");
+                FlowFormDataConfig.Table tableConfig = validateTableConfig(flowFormTable.getDataConfig(), "子表配置");
+
+                // 查询子表数据
+                String subSql = "SELECT * FROM " + quoteTable(tableConfig.getTableName())
+                        + " WHERE " + quoteColumn(fkField) + " = ? AND " + quoteColumn("deleted") + " = false";
+                List<Map<String, Object>> subList = FlowFormSqlUtils.queryForMaps(conn, subSql, List.of(recordId));
+
+                // 将子表数据添加到主数据中
+                mainData.put(item.getName(), subList);
+            }
+
+            return mainData;
+        }
     }
 
     public void removeFormDataById(Integer flowFormId, String id) throws SQLException {
@@ -787,28 +762,29 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
             throw new BuzzException("表单不存在，formId=" + flowFormId);
         }
 
-        FlowFormDataConfig dataConfig = flowForm.getDataConfig();
-        if (dataConfig == null || dataConfig.getMain() == null) {
-            throw new BuzzException("表单数据配置不存在，formId=" + flowFormId);
+        FlowFormDataConfig.Table mainTable = requireMainTableConfig(flowForm);
+        String mainTableName = mainTable.getTableName();
+        if (ids.size() > MAX_BATCH_SIZE) {
+            throw new BuzzException("单次最多删除" + MAX_BATCH_SIZE + "条数据");
         }
+        List<Long> recordIds = ids.stream().map(this::parseRecordId).toList();
 
-        String mainTableName = dataConfig.getMain().getTableName();
-        if (StrUtil.isEmpty(mainTableName)) {
-            throw new BuzzException("表单主表名称不存在，formId=" + flowFormId);
+        // 组装参数化软删除 SQL
+        String sql = "UPDATE " + quoteTable(mainTableName)
+                + " SET " + quoteColumn("deleted") + " = ?, "
+                + quoteColumn("upd_time") + " = CURRENT_TIMESTAMP, "
+                + quoteColumn("upd_user") + " = ? WHERE "
+                + quoteColumn("id") + " IN (" + FlowFormSqlUtils.placeholders(recordIds.size()) + ") AND "
+                + quoteColumn("deleted") + " = false";
+        List<Object> params = new ArrayList<>();
+        params.add(true);
+        params.add(getCurrentUserId());
+        params.addAll(recordIds);
+
+        int affectedRows;
+        try (Connection conn = dataSource.getConnection()) {
+            affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql, params);
         }
-
-        // 组装删除SQL（软删除）
-        String sql = String.format(
-            "UPDATE `%s` SET deleted = true, upd_time = CURRENT_TIMESTAMP, upd_user = '%s' WHERE id IN (%s) AND deleted = false",
-            mainTableName,
-            getCurrentUserId(),
-            String.join(",", ids)
-        );
-
-        // 执行删除SQL
-        @Cleanup Connection conn = dataSource.getConnection();
-        int affectedRows = SqlExecutor.execute(conn, sql);
-        
         if (affectedRows == 0) {
             throw new BuzzException("数据不存在或已被删除，id=" + ids);
         }
@@ -828,22 +804,166 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         return list;
     }
 
-    /**
-     * 判断表是否有flow_instance_id字段
-     * @param tableName 表名
-     * @return 是否有flow_instance_id字段
-     */
-    private boolean hasFlowInstanceIdField(String tableName) {
-        try {
-            TableInfoVo tableInfo = queryTableStructure(tableName);
-            if (tableInfo.getExist() != null && tableInfo.getExist()) {
-                return tableInfo.getColumns().stream()
-                        .anyMatch(column -> "flow_instance_id".equals(column.getField()));
-            }
-        } catch (SQLException e) {
-            // 查询表结构失败，返回false
+    private FlowFormDataConfig.Table requireMainTableConfig(FlowForm flowForm) {
+        if (flowForm == null) {
+            throw new BuzzException("流程表单不存在");
         }
-        return false;
+        FlowFormDataConfig dataConfig = flowForm.getDataConfig();
+        if (dataConfig == null || dataConfig.getMain() == null) {
+            throw new BuzzException("表单数据配置不存在，formId=" + flowForm.getId());
+        }
+
+        String registeredTableName = FlowFormSqlUtils.requireTableName(flowForm.getTableName());
+        FlowFormDataConfig.Table mainTable = validateTableConfig(dataConfig.getMain(), "主表配置");
+        if (!registeredTableName.equals(mainTable.getTableName())) {
+            throw new BuzzException("流程表单表名与数据配置不一致");
+        }
+        return mainTable;
+    }
+
+    private FlowFormDataConfig.Table validateTableConfig(FlowFormDataConfig.Table tableConfig, String label) {
+        if (tableConfig == null) {
+            throw new BuzzException(label + "不能为空");
+        }
+        String tableName = FlowFormSqlUtils.requireTableName(tableConfig.getTableName());
+        if (tableConfig.getColumns() == null || tableConfig.getColumns().isEmpty()) {
+            throw new BuzzException(label + "字段配置不能为空");
+        }
+
+        Set<String> fields = new HashSet<>();
+        for (FlowFormDataConfig.Column column : tableConfig.getColumns()) {
+            if (column == null) {
+                throw new BuzzException(label + "包含空字段配置");
+            }
+            String field = FlowFormSqlUtils.requireIdentifier(column.getField(), "字段名");
+            if (!fields.add(field.toLowerCase(Locale.ROOT))) {
+                throw new BuzzException(label + "包含重复字段: " + field);
+            }
+        }
+        tableConfig.setTableName(tableName);
+        return tableConfig;
+    }
+
+    private String requireManagedTableName(String tableName) throws SQLException {
+        String validTableName = FlowFormSqlUtils.requireTableName(tableName);
+        boolean registered = lambdaQuery()
+                .eq(FlowForm::getTableName, validTableName)
+                .count() > 0;
+        if (!registered) {
+            registered = flowFormTableBiz.lambdaQuery()
+                    .eq(FlowFormTable::getTableName, validTableName)
+                    .count() > 0;
+        }
+        if (!registered) {
+            throw new BuzzException("表未注册为流程表单数据表: " + validTableName);
+        }
+        return validTableName;
+    }
+
+    private void ensureTableExists(String tableName) throws SQLException {
+        TableInfoVo tableInfo = queryTableStructure(tableName);
+        if (!Boolean.TRUE.equals(tableInfo.getExist())) {
+            throw new BuzzException("表不存在，tableName=" + tableName);
+        }
+    }
+
+    private String validateMutableColumn(TableColumnVo column) {
+        if (column == null) {
+            throw new BuzzException("字段配置不能为空");
+        }
+        String field = FlowFormSqlUtils.requireIdentifier(column.getField(), "字段名");
+        if (SYSTEM_FIELDS.contains(field.toLowerCase(Locale.ROOT))) {
+            throw new BuzzException("系统字段不允许修改: " + field);
+        }
+        buildColumnDefinition(column);
+        return field;
+    }
+
+    private String buildColumnDefinition(TableColumnVo column) {
+        String dataType = column.getDataType();
+        if (dataType == null) {
+            throw new BuzzException("字段类型不能为空");
+        }
+        dataType = dataType.toLowerCase(Locale.ROOT);
+        if (!ALLOWED_DATA_TYPES.contains(dataType)) {
+            throw new BuzzException("不支持的字段类型: " + dataType);
+        }
+
+        StringBuilder definition = new StringBuilder(dataType);
+        if (DATA_TYPES_LENGTH.contains(dataType) && column.getLength() != null) {
+            validateRange(column.getLength(), 1, 65535, "字段长度");
+            definition.append('(').append(column.getLength()).append(')');
+        } else if (DATA_TYPES_PRECISION.contains(dataType)
+                && column.getPrecision() != null && column.getScale() != null) {
+            validateRange(column.getPrecision(), 1, 65, "字段精度");
+            validateRange(column.getScale(), 0, 30, "字段小数位");
+            if (column.getScale() > column.getPrecision()) {
+                throw new BuzzException("字段小数位不能大于字段精度");
+            }
+            definition.append('(').append(column.getPrecision()).append(',')
+                    .append(column.getScale()).append(')');
+        }
+
+        String nullable = column.getNullable();
+        if (nullable == null || "YES".equalsIgnoreCase(nullable)) {
+            definition.append(" NULL");
+        } else if ("NO".equalsIgnoreCase(nullable)) {
+            definition.append(" NOT NULL");
+        } else {
+            throw new BuzzException("nullable 只能是 YES 或 NO");
+        }
+
+        if (column.getDefaultValue() != null) {
+            validateDdlText(column.getDefaultValue(), "默认值");
+            definition.append(" DEFAULT ")
+                    .append(FlowFormSqlUtils.quoteDdlLiteral(column.getDefaultValue(), "默认值"));
+        }
+        if (column.getComment() != null) {
+            validateDdlText(column.getComment(), "字段注释");
+            definition.append(" COMMENT ")
+                    .append(FlowFormSqlUtils.quoteDdlLiteral(column.getComment(), "字段注释"));
+        }
+        return definition.toString();
+    }
+
+    private void validateDdlText(String value, String label) {
+        if (value != null && value.length() > MAX_DDL_TEXT_LENGTH) {
+            throw new BuzzException(label + "长度不能超过" + MAX_DDL_TEXT_LENGTH);
+        }
+    }
+
+    private void validateRange(Integer value, int min, int max, String label) {
+        if (value == null || value < min || value > max) {
+            throw new BuzzException(label + "必须在" + min + "到" + max + "之间");
+        }
+    }
+
+    private String normalizeQueryField(String field) {
+        return FlowFormSqlUtils.requireIdentifier(StrUtil.toUnderlineCase(field), "查询字段");
+    }
+
+    private String quoteTable(String tableName) {
+        return FlowFormSqlUtils.quoteIdentifier(
+                FlowFormSqlUtils.requireTableName(tableName), "表名");
+    }
+
+    private String quoteColumn(String columnName) {
+        return FlowFormSqlUtils.quoteIdentifier(columnName, "字段名");
+    }
+
+    private Long parseRecordId(Object id) {
+        if (id == null) {
+            throw new BuzzException("记录 ID 不能为空");
+        }
+        try {
+            long value = Long.parseLong(String.valueOf(id));
+            if (value <= 0) {
+                throw new NumberFormatException("non-positive");
+            }
+            return value;
+        } catch (NumberFormatException e) {
+            throw new BuzzException("记录 ID 必须是正整数");
+        }
     }
 
 }

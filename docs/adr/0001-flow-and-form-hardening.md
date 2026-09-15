@@ -86,10 +86,11 @@ Accepted（待逐项实施）
 
 ### P0：必须先完成的安全边界
 
-- [ ] **F-SEC-01 动态 SQL/DDL 收口**
+- [x] **F-SEC-01 动态 SQL/DDL 收口**
   - 范围：`FlowFormBiz.java`、`FlowFormMapper.xml`、`FlowFormController.java`。
   - 修复：删除任意 SQL 片段和直接拼接用户值；引入元数据注册表、标识符白名单、预编译参数、排序/操作符白名单；DDL 权限与审计分离。
   - 验收：代码中不存在用户输入直达 `${sql}`/JDBC SQL 的路径；注入字符、越权表名/列名、非法排序字段均被拒绝；正常动态表单 CRUD 和字段变更仍可用。
+  - 实施记录（2026-09-15）：新增动态表/字段标识符和 DDL 类型校验；DDL 变更仅允许已登记流程表单表并要求 `/admin/flow/manage/form` 权限；数据 CRUD 改为 `PreparedStatement`；分页查询改为参数化 count/data 查询；移除 `${sql}` Mapper 通路。租户条件、主子表归属和事务一致性仍分别由 `F-SEC-02`、`F-WF-01` 处理。
 
 - [ ] **F-SEC-02 租户、系统字段和子表归属校验**
   - 范围：`FlowFormBiz` 的新增、更新、分页、详情、删除及 `updateFormData`。
