@@ -51,6 +51,6 @@ public class DemoFlowLeave extends BaseDelEntity {
     private Date leaveEndTime;
 
     @ExcelProperty("租户ID")
-    private Integer tenantId;
+    private String tenantId;
 
 }
