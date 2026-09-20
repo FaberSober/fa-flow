@@ -72,7 +72,7 @@ public class FlowTaskController extends BaseResHandler {
     @RequestMapping(value = "/pass", method = RequestMethod.POST)
     @ResponseBody
     public Ret<Boolean> pass(@Validated @RequestBody FlowTaskPassReqVo reqVo) {
-        flowTaskBiz.pass(reqVo.getTaskId());
+        flowTaskBiz.pass(reqVo.getTaskId(), reqVo.getComment());
         return ok();
     }
 
@@ -80,7 +80,7 @@ public class FlowTaskController extends BaseResHandler {
     @RequestMapping(value = "/reject", method = RequestMethod.POST)
     @ResponseBody
     public Ret<Boolean> reject(@Validated @RequestBody FlowTaskRejectReqVo reqVo) {
-        flowTaskBiz.reject(reqVo.getTaskId());
+        flowTaskBiz.reject(reqVo.getTaskId(), reqVo.getReason());
         return ok();
     }
 

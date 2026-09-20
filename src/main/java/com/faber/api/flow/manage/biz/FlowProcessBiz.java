@@ -630,6 +630,7 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
             approval.setTaskName(hisTask.getTaskName());
             approval.setTaskKey(hisTask.getTaskKey());
             approval.setType(1); // 1表示已完成的审批任务
+            setTaskAction(approval, hisTask);
             
             approvals.add(approval);
         }
@@ -666,6 +667,23 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
         }
 
         return approvals;
+    }
+
+    private void setTaskAction(FlowProcessApprovalVo approval, FlwHisTask hisTask) {
+        Map<String, Object> variables = hisTask.variableMap();
+        if (variables == null) {
+            return;
+        }
+        Object actionValue = variables.get(FlowTaskBiz.TASK_ACTION_VARIABLE);
+        if (!(actionValue instanceof Map<?, ?> action)) {
+            return;
+        }
+        approval.setComment(toStringValue(action.get(FlowTaskBiz.COMMENT_VARIABLE)));
+        approval.setReason(toStringValue(action.get(FlowTaskBiz.REASON_VARIABLE)));
+    }
+
+    private String toStringValue(Object value) {
+        return value == null ? null : value.toString();
     }
 
     // public void deployById(Integer id) {

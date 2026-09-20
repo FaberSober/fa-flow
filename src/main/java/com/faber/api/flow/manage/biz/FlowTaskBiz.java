@@ -2,6 +2,7 @@ package com.faber.api.flow.manage.biz;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 import org.springframework.stereotype.Service;
 
@@ -10,6 +11,7 @@ import com.aizuda.bpm.engine.core.FlowCreator;
 import com.aizuda.bpm.engine.core.enums.NodeSetType;
 import com.aizuda.bpm.engine.entity.FlwInstance;
 import com.aizuda.bpm.engine.entity.FlwTask;
+import com.aizuda.bpm.engine.entity.FlwTaskActor;
 import com.aizuda.bpm.engine.model.NodeModel;
 import com.alibaba.fastjson2.JSONObject;
 import com.faber.api.flow.manage.mapper.FlowTaskFaMapper;
@@ -24,10 +26,15 @@ import com.faber.core.vo.query.BasePageQuery;
 import com.github.pagehelper.PageHelper;
 import com.github.pagehelper.PageInfo;
 
+import cn.hutool.core.util.StrUtil;
 import jakarta.annotation.Resource;
 
 @Service
 public class FlowTaskBiz {
+
+    static final String TASK_ACTION_VARIABLE = "_faFlowTaskAction";
+    static final String COMMENT_VARIABLE = "comment";
+    static final String REASON_VARIABLE = "reason";
 
     @Resource FlowTaskFaMapper flowTaskFaMapper;
     @Resource FlowLongEngine flowLongEngine;
@@ -77,24 +84,32 @@ public class FlowTaskBiz {
         return new TableRet<>(info);
     }
 
-    public void pass(Long taskId) {
-        FlowCreator flowCreator = FlowCreator.of(BaseContextHandler.getUserId(), BaseContextHandler.getName());
-        FlwTask flwTask = flowLongEngine.queryService().getTask(taskId);
-        FlwInstance flwInstance = flowLongEngine.queryService().getInstance(flwTask.getInstanceId());
-        JSONObject vJsonObject = JSONObject.parse(flwInstance.getVariable());
-        // JSONObject formData = vJsonObject.getJSONObject("formData");
-        flowLongEngine.executeTask(taskId, flowCreator, vJsonObject);
+    public void pass(Long taskId, String comment) {
+        FlwTask flwTask = requireActionableTask(taskId);
+        FlowCreator flowCreator = currentFlowCreator();
+        Map<String, Object> variables = buildTaskVariables(flwTask, COMMENT_VARIABLE, comment);
+        if (!flowLongEngine.executeTask(taskId, flowCreator, variables)) {
+            throw new BuzzException("任务办理失败");
+        }
     }
 
-    public void reject(Long taskId) {
-        FlowCreator flowCreator = FlowCreator.of(BaseContextHandler.getUserId(), BaseContextHandler.getName());
-        FlwTask flwTask = flowLongEngine.queryService().getTask(taskId);
-        flowLongEngine.executeRejectTask(flwTask, null, flowCreator, null, true);
+    public void reject(Long taskId, String reason) {
+        FlwTask flwTask = requireActionableTask(taskId);
+        FlowCreator flowCreator = currentFlowCreator();
+        Map<String, Object> variables = buildTaskVariables(flwTask, REASON_VARIABLE, reason);
+        // false 表示由引擎读取当前节点的 rejectStrategy，避免固定终止流程。
+        if (flowLongEngine.executeRejectTask(flwTask, null, flowCreator, variables, false).isEmpty()) {
+            throw new BuzzException("任务驳回失败");
+        }
     }
 
     public void claim(Long taskId) {
-        FlowCreator flowCreator = FlowCreator.of(BaseContextHandler.getUserId(), BaseContextHandler.getName());
+        FlwTask flwTask = requireActionableTask(taskId);
+        FlowCreator flowCreator = currentFlowCreator();
         NodeModel nodeModel = flowLongEngine.taskService().getTaskModel(taskId);
+        if (nodeModel == null) {
+            throw new BuzzException("当前任务节点不存在");
+        }
         Integer setType = nodeModel.getSetType();
         if (NodeSetType.department.eq(setType)) {
             flowLongEngine.taskService().claimDepartment(taskId, flowCreator);
@@ -103,6 +118,92 @@ public class FlowTaskBiz {
         } else {
             throw new BuzzException("当前任务不支持认领操作");
         }
+    }
+
+    private FlwTask requireActionableTask(Long taskId) {
+        if (taskId == null) {
+            throw new BuzzException("任务ID不能为空");
+        }
+
+        FlwTask flwTask = flowLongEngine.queryService().getTask(taskId);
+        if (flwTask == null) {
+            throw new BuzzException("任务不存在或已处理");
+        }
+        if (flwTask.getInstanceId() == null) {
+            throw new BuzzException("任务未关联流程实例");
+        }
+
+        FlwInstance flwInstance = flowLongEngine.queryService().getInstance(flwTask.getInstanceId());
+        if (flwInstance == null || !Objects.equals(flwTask.getInstanceId(), flwInstance.getId())) {
+            throw new BuzzException("流程实例不存在或已结束");
+        }
+
+        String userId = requireCurrentUserId();
+        FlwTaskActor actor = flowLongEngine.taskService().isAllowed(flwTask, userId);
+        if (actor == null) {
+            throw new BuzzException("当前用户无权办理该任务");
+        }
+
+        String tenantId = BaseContextHandler.getTenantId();
+        if (StrUtil.isNotBlank(tenantId)
+                && (!Objects.equals(tenantId, flwTask.getTenantId())
+                || !Objects.equals(tenantId, flwInstance.getTenantId()))) {
+            throw new BuzzException("任务不属于当前租户");
+        }
+        return flwTask;
+    }
+
+    private FlowCreator currentFlowCreator() {
+        String userId = requireCurrentUserId();
+        String userName = BaseContextHandler.getName();
+        if (StrUtil.isBlank(userName)) {
+            userName = userId;
+        }
+        FlowCreator flowCreator = FlowCreator.of(userId, userName);
+        String tenantId = BaseContextHandler.getTenantId();
+        if (StrUtil.isNotBlank(tenantId)) {
+            flowCreator.tenantId(tenantId);
+        }
+        return flowCreator;
+    }
+
+    private String requireCurrentUserId() {
+        String userId = BaseContextHandler.getUserId();
+        if (StrUtil.isBlank(userId)) {
+            throw new BuzzException("当前用户上下文为空");
+        }
+        return userId;
+    }
+
+    private Map<String, Object> buildTaskVariables(FlwTask flwTask, String actionName, String actionValue) {
+        FlwInstance flwInstance = flowLongEngine.queryService().getInstance(flwTask.getInstanceId());
+        Map<String, Object> variables = new HashMap<>();
+        if (flwInstance != null && StrUtil.isNotBlank(flwInstance.getVariable())) {
+            try {
+                JSONObject instanceVariables = JSONObject.parseObject(flwInstance.getVariable());
+                if (instanceVariables != null) {
+                    variables.putAll(instanceVariables);
+                }
+            } catch (RuntimeException e) {
+                throw new BuzzException("流程实例变量格式错误");
+            }
+        }
+
+        String normalizedActionValue = normalizeActionValue(actionValue);
+        if (normalizedActionValue != null) {
+            Map<String, Object> action = new HashMap<>();
+            action.put(actionName, normalizedActionValue);
+            variables.put(TASK_ACTION_VARIABLE, action);
+        }
+        return variables;
+    }
+
+    private String normalizeActionValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isEmpty() ? null : normalized;
     }
     
     /**

@@ -66,6 +66,16 @@ public class FlowProcessApprovalVo implements Serializable {
     private Integer type;
 
     /**
+     * 审批意见
+     */
+    private String comment;
+
+    /**
+     * 驳回原因
+     */
+    private String reason;
+
+    /**
      * 扩展内容，用于存储待处理任务的审批人信息
      */
     private FlowProcessApprovalContentVo content;
