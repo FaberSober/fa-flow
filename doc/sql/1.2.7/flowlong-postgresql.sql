@@ -2,8 +2,8 @@
 -- ----------------------------
 -- Table structure for flw_his_task_actor
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_his_task_actor";
-CREATE TABLE IF NOT EXISTS "flw_his_task_actor" (
+DROP TABLE IF EXISTS "flw_his_task_actor";
+CREATE TABLE "flw_his_task_actor" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "instance_id" int8 NOT NULL,
@@ -33,8 +33,8 @@ COMMENT ON TABLE "flw_his_task_actor" IS '历史任务参与者表';
 -- ----------------------------
 -- Table structure for flw_his_task
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_his_task";
-CREATE TABLE IF NOT EXISTS "flw_his_task" (
+DROP TABLE IF EXISTS "flw_his_task";
+CREATE TABLE "flw_his_task" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "create_id" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
@@ -90,8 +90,8 @@ COMMENT ON TABLE "flw_his_task" IS '历史任务表';
 -- ----------------------------
 -- Table structure for flw_task_actor
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_task_actor";
-CREATE TABLE IF NOT EXISTS "flw_task_actor" (
+DROP TABLE IF EXISTS "flw_task_actor";
+CREATE TABLE "flw_task_actor" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "instance_id" int8 NOT NULL,
@@ -121,8 +121,8 @@ COMMENT ON TABLE "flw_task_actor" IS '任务参与者表';
 -- ----------------------------
 -- Table structure for flw_task
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_task";
-CREATE TABLE IF NOT EXISTS "flw_task" (
+DROP TABLE IF EXISTS "flw_task";
+CREATE TABLE "flw_task" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "create_id" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
@@ -169,8 +169,8 @@ COMMENT ON TABLE "flw_task" IS '任务表';
 -- ----------------------------
 -- Table structure for flw_ext_instance
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_ext_instance";
-CREATE TABLE IF NOT EXISTS "flw_ext_instance" (
+DROP TABLE IF EXISTS "flw_ext_instance";
+CREATE TABLE "flw_ext_instance" (
      "id" int8 NOT NULL,
      "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
      "process_id" int8 NOT NULL,
@@ -190,8 +190,8 @@ COMMENT ON TABLE "flw_ext_instance" IS '扩展流程实例表';
 -- ----------------------------
 -- Table structure for flw_his_instance
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_his_instance";
-CREATE TABLE IF NOT EXISTS "flw_his_instance" (
+DROP TABLE IF EXISTS "flw_his_instance";
+CREATE TABLE "flw_his_instance" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "create_id" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
@@ -239,8 +239,8 @@ COMMENT ON TABLE "flw_his_instance" IS '历史流程实例表';
 -- ----------------------------
 -- Table structure for flw_instance
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_instance";
-CREATE TABLE IF NOT EXISTS "flw_instance" (
+DROP TABLE IF EXISTS "flw_instance";
+CREATE TABLE "flw_instance" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "create_id" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
@@ -282,8 +282,8 @@ COMMENT ON TABLE "flw_instance" IS '流程实例表';
 -- ----------------------------
 -- Table structure for flw_process
 -- ----------------------------
--- DROP TABLE IF EXISTS "flw_process";
-CREATE TABLE IF NOT EXISTS "flw_process" (
+DROP TABLE IF EXISTS "flw_process";
+CREATE TABLE "flw_process" (
     "id" int8 NOT NULL,
     "tenant_id" varchar(50) COLLATE "pg_catalog"."default",
     "create_id" varchar(50) COLLATE "pg_catalog"."default" NOT NULL,
