@@ -4,35 +4,96 @@
 <mapper namespace="com.faber.api.flow.form.mapper.FlowFormMapper">
 
     <select id="getTableColumns" parameterType="map" resultType="com.faber.api.flow.form.vo.ret.TableColumnVo">
-        SELECT 
-            COLUMN_NAME          AS field,
-            COLUMN_TYPE          AS type,
-            DATA_TYPE            AS dataType,
-            CHARACTER_MAXIMUM_LENGTH AS length,
-            NUMERIC_PRECISION    AS `precision`,
-            NUMERIC_SCALE        AS scale,
-            IS_NULLABLE          AS nullable,
-            COLUMN_DEFAULT       AS defaultValue,
-            COLUMN_KEY           AS `key`,
-            EXTRA                AS extra,
-            COLUMN_COMMENT       AS comment
-        FROM 
-            information_schema.columns
-        WHERE 
-            TABLE_SCHEMA = (select database())
-            AND TABLE_NAME = #{tableName}
-        ORDER BY 
-            ORDINAL_POSITION
+        <choose>
+            <when test="_databaseId == 'postgre'">
+                SELECT
+                    c.column_name AS field,
+                    (
+                        SELECT format_type(a.atttypid, a.atttypmod)
+                        FROM pg_catalog.pg_attribute a
+                        JOIN pg_catalog.pg_class pc ON pc.oid = a.attrelid
+                        JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
+                        WHERE pn.nspname = c.table_schema
+                          AND pc.relname = c.table_name
+                          AND a.attname = c.column_name
+                          AND a.attnum > 0
+                          AND NOT a.attisdropped
+                    ) AS type,
+                    c.data_type AS dataType,
+                    c.character_maximum_length AS length,
+                    c.numeric_precision AS "precision",
+                    c.numeric_scale AS scale,
+                    c.is_nullable AS nullable,
+                    c.column_default AS defaultValue,
+                    CASE WHEN EXISTS (
+                        SELECT 1
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON kcu.constraint_schema = tc.constraint_schema
+                         AND kcu.constraint_name = tc.constraint_name
+                         AND kcu.table_schema = tc.table_schema
+                         AND kcu.table_name = tc.table_name
+                        WHERE tc.constraint_type = 'PRIMARY KEY'
+                          AND tc.table_schema = c.table_schema
+                          AND tc.table_name = c.table_name
+                          AND kcu.column_name = c.column_name
+                    ) THEN 'PRI' ELSE '' END AS "key",
+                    CASE WHEN c.column_default LIKE 'nextval(%' THEN 'auto_increment' ELSE '' END AS extra,
+                    (
+                        SELECT col_description(pc.oid, c.ordinal_position)
+                        FROM pg_catalog.pg_class pc
+                        JOIN pg_catalog.pg_namespace pn ON pn.oid = pc.relnamespace
+                        WHERE pn.nspname = c.table_schema
+                          AND pc.relname = c.table_name
+                    ) AS comment
+                FROM information_schema.columns c
+                WHERE c.table_schema = current_schema()
+                  AND c.table_name = #{tableName}
+                ORDER BY c.ordinal_position
+            </when>
+            <otherwise>
+                SELECT
+                    COLUMN_NAME          AS field,
+                    COLUMN_TYPE          AS type,
+                    DATA_TYPE            AS dataType,
+                    CHARACTER_MAXIMUM_LENGTH AS length,
+                    NUMERIC_PRECISION    AS `precision`,
+                    NUMERIC_SCALE        AS scale,
+                    IS_NULLABLE          AS nullable,
+                    COLUMN_DEFAULT       AS defaultValue,
+                    COLUMN_KEY           AS `key`,
+                    EXTRA                AS extra,
+                    COLUMN_COMMENT       AS comment
+                FROM
+                    information_schema.columns
+                WHERE
+                    TABLE_SCHEMA = (select database())
+                    AND TABLE_NAME = #{tableName}
+                ORDER BY
+                    ORDINAL_POSITION
+            </otherwise>
+        </choose>
     </select>
     
     <select id="getTableComment" parameterType="map" resultType="string">
-        SELECT 
-            TABLE_COMMENT
-        FROM 
-            information_schema.tables
-        WHERE 
-            TABLE_SCHEMA = (select database())
-            AND TABLE_NAME = #{tableName}
+        <choose>
+            <when test="_databaseId == 'postgre'">
+                SELECT obj_description(c.oid, 'pg_class')
+                FROM pg_catalog.pg_class c
+                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = current_schema()
+                  AND c.relname = #{tableName}
+            </when>
+            <otherwise>
+                SELECT
+                    TABLE_COMMENT
+                FROM
+                    information_schema.tables
+                WHERE
+                    TABLE_SCHEMA = (select database())
+                    AND TABLE_NAME = #{tableName}
+            </otherwise>
+        </choose>
     </select>
 
 </mapper>
