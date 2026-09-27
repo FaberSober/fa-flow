@@ -38,7 +38,8 @@
                           AND tc.table_name = c.table_name
                           AND kcu.column_name = c.column_name
                     ) THEN 'PRI' ELSE '' END AS "key",
-                    CASE WHEN c.column_default LIKE 'nextval(%' THEN 'auto_increment' ELSE '' END AS extra,
+                    CASE WHEN c.is_identity = 'YES' OR c.column_default LIKE 'nextval(%'
+                         THEN 'auto_increment' ELSE '' END AS extra,
                     (
                         SELECT col_description(pc.oid, c.ordinal_position)
                         FROM pg_catalog.pg_class pc

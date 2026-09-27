@@ -84,29 +84,21 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         }
     }
 
+    @Transactional(rollbackFor = Exception.class)
     public void createFormTable(CreateFormTableReqVo reqVo) throws SQLException {
         String tableName = FlowFormSqlUtils.requireTableName(reqVo.getTableName());
         String comment = reqVo.getComment();
         validateDdlText(comment, "表注释");
 
-        // 创建基础表
-        String createTableSql = String.format(
-                "CREATE TABLE %s (\n" +
-                "  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT 'ID',\n" +
-                "  `flow_instance_id` bigint(20) DEFAULT NULL COMMENT '流程实例ID',\n" +
-                "  `tenant_id` varchar(32) DEFAULT NULL COMMENT '租户ID',\n" +
-                "  `crt_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',\n" +
-                "  `crt_user` varchar(32) NOT NULL COMMENT '创建用户ID',\n" +
-                "  `upd_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',\n" +
-                "  `upd_user` varchar(32) DEFAULT NULL COMMENT '更新用户ID',\n" +
-                "  `deleted` tinyint(1) NOT NULL DEFAULT '0' COMMENT '是否删除',\n" +
-                "  PRIMARY KEY (`id`)\n" +
-                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT=%s",
-                FlowFormSqlUtils.quoteIdentifier(tableName, "表名"),
-                FlowFormSqlUtils.quoteDdlLiteral(comment == null ? "" : comment, "表注释")
-        );
-
-        FlowFormSqlUtils.executeDdl(dataSource, createTableSql);
+        Connection connection = DataSourceUtils.getConnection(dataSource);
+        try {
+            FlowFormDdlDialect dialect = FlowFormDdlDialect.from(connection);
+            for (String sql : dialect.createFormTableStatements(tableName, comment)) {
+                FlowFormSqlUtils.executeDdl(connection, sql);
+            }
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
+        }
     }
 
     public TableInfoVo queryTableStructure(String tableName) throws SQLException {

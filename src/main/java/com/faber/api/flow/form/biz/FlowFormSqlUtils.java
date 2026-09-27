@@ -70,6 +70,21 @@ public final class FlowFormSqlUtils {
         return "'" + escaped + "'";
     }
 
+    /** PostgreSQL dollar-quoted 字符串，避免注释中的引号或反斜杠改变 SQL 语义。 */
+    public static String quotePostgresDdlLiteral(String value, String label) {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value.indexOf('\0') >= 0) {
+            throw new BuzzException(label + "不能包含空字符");
+        }
+        String delimiter = "$fa_flow$";
+        for (int suffix = 1; value.contains(delimiter); suffix++) {
+            delimiter = "$fa_flow_" + suffix + "$";
+        }
+        return delimiter + value + delimiter;
+    }
+
     public static String placeholders(int count) {
         if (count <= 0) {
             throw new IllegalArgumentException("占位符数量必须大于0");
@@ -184,6 +199,13 @@ public final class FlowFormSqlUtils {
     public static void executeDdl(DataSource dataSource, String sql) throws SQLException {
         try (Connection conn = dataSource.getConnection();
              Statement statement = conn.createStatement()) {
+            statement.executeUpdate(sql);
+        }
+    }
+
+    /** 在调用方管理的连接上执行 DDL，允许一组 PostgreSQL DDL 共享事务连接。 */
+    public static void executeDdl(Connection conn, String sql) throws SQLException {
+        try (Statement statement = conn.createStatement()) {
             statement.executeUpdate(sql);
         }
     }
