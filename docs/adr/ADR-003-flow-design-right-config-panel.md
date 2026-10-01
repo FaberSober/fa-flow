@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed（待确认）
+Accepted（本期功能已完成；历史版本功能继续后置，当前主线为 ADR-005 表单管理）
 
 ## Date
 
