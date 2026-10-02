@@ -2,11 +2,14 @@ package com.faber.api.flow.form.biz;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
 import com.faber.core.exception.BuzzException;
+import com.faber.api.flow.form.vo.ret.TableColumnVo;
+import com.faber.api.flow.form.vo.ret.TableInfoVo;
 
 /** 方言隔离入口，优先覆盖动态流程表的基础建表语句。 */
 enum FlowFormDdlDialect {
@@ -76,4 +79,46 @@ enum FlowFormDdlDialect {
         return "COMMENT ON COLUMN " + quotedTableName + "." + quoteIdentifier(columnName, "字段名") + " IS " +
                 FlowFormSqlUtils.quotePostgresDdlLiteral(comment, "字段注释");
     }
+    /** JDBC 元数据用于两库结构检查，避免 PostgreSQL 执行 MySQL information_schema 查询。 */
+    static TableInfoVo tableStructure(Connection conn, String table) throws SQLException {
+        FlowFormSqlUtils.requireTableName(table);
+        String schema = FlowFormDdlDialect.from(conn) == FlowFormDdlDialect.POSTGRESQL ? conn.getSchema() : null;
+        String catalog = conn.getCatalog();
+        TableInfoVo info = new TableInfoVo();
+        info.setTableName(table);
+        info.setExist(false);
+        try (ResultSet tables = conn.getMetaData().getTables(catalog, schema, table, new String[] { "TABLE" })) {
+            while (tables.next()) {
+                if (table.equals(tables.getString("TABLE_NAME"))) {
+                    info.setExist(true);
+                    info.setTableComment(tables.getString("REMARKS"));
+                    break;
+                }
+            }
+        }
+        List<TableColumnVo> columns = new ArrayList<>();
+        if (Boolean.TRUE.equals(info.getExist())) {
+            try (ResultSet rs = conn.getMetaData().getColumns(catalog, schema, table, null)) {
+                while (rs.next()) {
+                    if (!table.equals(rs.getString("TABLE_NAME"))) continue;
+                    TableColumnVo column = new TableColumnVo();
+                    column.setField(rs.getString("COLUMN_NAME"));
+                    column.setDataType(rs.getString("TYPE_NAME"));
+                    column.setType(rs.getString("TYPE_NAME"));
+                    column.setLength(rs.getInt("COLUMN_SIZE"));
+                    column.setPrecision(rs.getInt("COLUMN_SIZE"));
+                    column.setScale(rs.getInt("DECIMAL_DIGITS"));
+                    column.setNullable(rs.getString("IS_NULLABLE"));
+                    column.setComment(rs.getString("REMARKS"));
+                    columns.add(column);
+                }
+            }
+            try (ResultSet keys = conn.getMetaData().getPrimaryKeys(catalog, schema, table)) {
+                if (keys.next()) info.setPkField(keys.getString("COLUMN_NAME"));
+            }
+        }
+        info.setColumns(columns);
+        return info;
+    }
+
 }

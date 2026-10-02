@@ -99,11 +99,16 @@ public final class FlowFormSqlUtils {
         return result.toString();
     }
 
+    /** 已校验的动态 CRUD SQL 使用数据库对应的标识符引用。业务值均为绑定参数。 */
+    private static String dialectSql(Connection conn, String sql) throws SQLException {
+        return FlowFormDdlDialect.from(conn) == FlowFormDdlDialect.POSTGRESQL ? sql.replace('`', '"') : sql;
+    }
+
     /**
      * 执行不返回结果集的参数化 SQL。
      */
     public static int executeUpdate(Connection conn, String sql, List<?> params) throws SQLException {
-        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+        try (PreparedStatement statement = conn.prepareStatement(dialectSql(conn, sql))) {
             bindParameters(statement, params);
             return statement.executeUpdate();
         }
@@ -113,7 +118,7 @@ public final class FlowFormSqlUtils {
      * 执行插入 SQL 并读取数据库生成的主键。
      */
     public static Long executeInsert(Connection conn, String sql, List<?> params) throws SQLException {
-        try (PreparedStatement statement = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+        try (PreparedStatement statement = conn.prepareStatement(dialectSql(conn, sql), Statement.RETURN_GENERATED_KEYS)) {
             bindParameters(statement, params);
             int affectedRows = statement.executeUpdate();
             if (affectedRows == 0) {
@@ -139,7 +144,7 @@ public final class FlowFormSqlUtils {
      * 执行返回单个 long 值的查询。
      */
     public static long queryForLong(Connection conn, String sql, List<?> params) throws SQLException {
-        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+        try (PreparedStatement statement = conn.prepareStatement(dialectSql(conn, sql))) {
             bindParameters(statement, params);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
@@ -155,7 +160,7 @@ public final class FlowFormSqlUtils {
      */
     public static List<Map<String, Object>> queryForMaps(Connection conn, String sql, List<?> params)
             throws SQLException {
-        try (PreparedStatement statement = conn.prepareStatement(sql)) {
+        try (PreparedStatement statement = conn.prepareStatement(dialectSql(conn, sql))) {
             bindParameters(statement, params);
             try (ResultSet resultSet = statement.executeQuery()) {
                 ResultSetMetaData metadata = resultSet.getMetaData();

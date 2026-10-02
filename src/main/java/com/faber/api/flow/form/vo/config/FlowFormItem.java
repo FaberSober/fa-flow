@@ -33,6 +33,15 @@ public class FlowFormItem implements Serializable {
     /** 校验规则 */
     private List<Map<String, Object>> rules;
     
+    /** 发布设计器的选择项配置 */
+    private List<Map<String, Object>> options;
+
+    /** multiple 表示多选 */
+    private String mode;
+
+    /** 默认值可以是字符串、数字或数组 */
+    private Object initialValue;
+
     /** 子表单项（用于容器类组件） */
     private List<FlowFormItem> children;
     

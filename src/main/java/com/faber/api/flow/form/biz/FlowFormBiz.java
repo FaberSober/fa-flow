@@ -106,6 +106,15 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         TableInfoVo tableInfo = new TableInfoVo();
         tableInfo.setTableName(tableName);
 
+        Connection connection = DataSourceUtils.getConnection(dataSource);
+        try {
+            if (FlowFormDdlDialect.from(connection) == FlowFormDdlDialect.POSTGRESQL) {
+                return FlowFormDdlDialect.tableStructure(connection, tableName);
+            }
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
+        }
+
         // 使用 Hutool 的 MetaUtil 来获取表结构
         Table tableMeta = MetaUtil.getTableMeta(dataSource, tableName);
         if (tableMeta == null) {
@@ -457,7 +466,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 if (value != null) {
                     fields.add(quoteColumn(field));
                     values.add("?");
-                    params.add(value);
+                    params.add(dynamicColumnValue(column, value));
                 }
             }
         }
@@ -525,11 +534,8 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
             if (data.containsKey(field)) {
                 Object value = data.get(field);
-                // 只更新非null值的字段
-                if (value != null) {
-                    assignments.add(quoteColumn(field) + " = ?");
-                    params.add(value);
-                }
+                assignments.add(quoteColumn(field) + " = ?");
+                params.add(dynamicColumnValue(column, value));
             }
         }
 
@@ -701,9 +707,18 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 if (textValue.length() > MAX_QUERY_VALUE_LENGTH) {
                     throw new BuzzException("查询值长度超过限制");
                 }
-                whereSql.append(" AND t.")
+                Connection dialectConnection = DataSourceUtils.getConnection(dataSource);
+                String castType;
+                try {
+                    castType = FlowFormDdlDialect.from(dialectConnection) == FlowFormDdlDialect.POSTGRESQL ? "TEXT" : "CHAR";
+                } catch (SQLException e) {
+                    throw new BuzzException("读取数据库类型失败: " + e.getMessage());
+                } finally {
+                    DataSourceUtils.releaseConnection(dialectConnection, dataSource);
+                }
+                whereSql.append(" AND CAST(t.")
                         .append(quoteColumn(field))
-                        .append(" LIKE ?");
+                        .append(" AS ").append(castType).append(") LIKE ?");
                 params.add("%" + textValue + "%");
             }
         }
@@ -1115,6 +1130,18 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
     private String quoteColumn(String columnName) {
         return FlowFormSqlUtils.quoteIdentifier(columnName, "字段名");
+    }
+
+    private Object dynamicColumnValue(FlowFormDataConfig.Column column, Object value) {
+        String type = column.getDataType();
+        if (value == null || type == null) return value;
+        if ("date".equalsIgnoreCase(type) && value instanceof String text) {
+            return text.isBlank() ? null : java.sql.Date.valueOf(text);
+        }
+        if (("numeric".equalsIgnoreCase(type) || "decimal".equalsIgnoreCase(type)) && value instanceof String text) {
+            return text.isBlank() ? null : new java.math.BigDecimal(text);
+        }
+        return value;
     }
 
     private Long parseRecordId(Object id) {

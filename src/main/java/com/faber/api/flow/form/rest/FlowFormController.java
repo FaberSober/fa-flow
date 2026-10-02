@@ -43,7 +43,6 @@ import cn.hutool.core.map.MapUtil;
 @RequestMapping("/api/flow/form/flowForm")
 public class FlowFormController extends BaseController<FlowFormBiz, FlowForm, Integer> {
 
-    
     @FaLogOpr(value = "新增主表", crud = LogCrudEnum.C)
     @Permission(permission = "/admin/flow/manage/form")
     @RequestMapping(value = "/createFormTable", method = RequestMethod.POST)
