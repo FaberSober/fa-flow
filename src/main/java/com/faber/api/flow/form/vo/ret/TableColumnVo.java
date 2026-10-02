@@ -50,19 +50,16 @@ public class TableColumnVo implements Serializable {
     /** 字段注释（最重要，用于表单 label） */
     private String comment;
 
-    // 后处理 length 的 getter
-    public Integer getLength() {
-        if (length != null) {
-            return length; // 字符类型直接用 CHARACTER_MAXIMUM_LENGTH
-        }
-        // 整数类型从 COLUMN_TYPE 解析显示宽度
-        if ("int".equalsIgnoreCase(dataType) || type != null) {
-            Matcher matcher = Pattern.compile("\\((\\d+)\\)").matcher(type);
-            if (matcher.find()) {
-                return Integer.parseInt(matcher.group(1));
-            }
-        }
-        return precision; // 备选：用 NUMERIC_PRECISION（如 int 默认 10）
-    }
+    /** 数据库已有的默认表达式暂不支持在设计器中编辑。 */
+    private Boolean defaultExpression;
 
+    public Integer getLength() {
+        if (length != null) return length;
+        if (type != null && ("varchar".equalsIgnoreCase(dataType) || "char".equalsIgnoreCase(dataType)
+                || "binary".equalsIgnoreCase(dataType) || "varbinary".equalsIgnoreCase(dataType))) {
+            Matcher matcher = Pattern.compile("\\((\\d+)\\)").matcher(type);
+            if (matcher.find()) return Integer.parseInt(matcher.group(1));
+        }
+        return null;
+    }
 }

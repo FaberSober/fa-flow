@@ -8,6 +8,9 @@ import lombok.Data;
 @Data
 public class TableInfoVo implements Serializable {
     
+    /** 当前数据源类型：mysql / postgre */
+    private String databaseType;
+
     /** 表名 */
     private String tableName;
     

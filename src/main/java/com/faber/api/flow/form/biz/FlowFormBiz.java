@@ -39,8 +39,6 @@ import com.faber.core.vo.utils.FaOption;
 import com.faber.core.web.biz.BaseBiz;
 
 import cn.hutool.core.util.StrUtil;
-import cn.hutool.db.meta.MetaUtil;
-import cn.hutool.db.meta.Table;
 import cn.hutool.json.JSONUtil;
 import jakarta.annotation.Resource;
 
@@ -58,14 +56,6 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
     @Resource FlowFormTableBiz flowFormTableBiz;
     @Resource FlowCatagoryBiz flowCatagoryBiz;
 
-    private static final Set<String> DATA_TYPES_LENGTH = Set.of(
-            "varchar", "char", "varbinary", "binary", "int", "bigint",
-            "tinyint", "smallint", "mediumint");
-    private static final Set<String> DATA_TYPES_PRECISION = Set.of("decimal", "numeric");
-    private static final Set<String> ALLOWED_DATA_TYPES = Set.of(
-            "varchar", "char", "varbinary", "binary", "int", "bigint", "tinyint",
-            "smallint", "mediumint", "decimal", "numeric", "float", "double", "text",
-            "datetime", "date", "timestamp", "json");
     private static final Set<String> TENANT_DATA_TYPES = Set.of("char", "varchar", "text", "character varying");
     private static final Set<String> SYSTEM_FIELDS = Set.of(
             "id", "tenant_id", "flow_instance_id", "crt_time", "crt_user",
@@ -103,100 +93,70 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
     public TableInfoVo queryTableStructure(String tableName) throws SQLException {
         tableName = FlowFormSqlUtils.requireTableName(tableName);
-        TableInfoVo tableInfo = new TableInfoVo();
-        tableInfo.setTableName(tableName);
-
         Connection connection = DataSourceUtils.getConnection(dataSource);
         try {
-            if (FlowFormDdlDialect.from(connection) == FlowFormDdlDialect.POSTGRESQL) {
-                return FlowFormDdlDialect.tableStructure(connection, tableName);
+            FlowFormDdlDialect dialect = FlowFormDdlDialect.from(connection);
+            TableInfoVo info = FlowFormDdlDialect.tableStructure(connection, tableName);
+            if (Boolean.TRUE.equals(info.getExist())) {
+                List<TableColumnVo> columns = baseMapper.getTableColumns(tableName);
+                columns.forEach(dialect::normalizeColumn);
+                info.setColumns(columns);
+                info.setTableComment(baseMapper.getTableComment(tableName));
+            }
+            return info;
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void createColumn(CreateColumnReqVo reqVo) throws SQLException {
+        modifyColumn(reqVo, false);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void updateColumn(CreateColumnReqVo reqVo) throws SQLException {
+        modifyColumn(reqVo, true);
+    }
+
+    private void modifyColumn(CreateColumnReqVo reqVo, boolean update) throws SQLException {
+        String tableName = requireManagedTableName(reqVo.getTableName());
+        TableColumnVo column = reqVo.getColumn();
+        String columnName = validateMutableColumn(column);
+        if (update && reqVo.getOriginalField() != null && !reqVo.getOriginalField().equals(columnName)) {
+            throw new BuzzException("暂不支持字段重命名");
+        }
+        TableInfoVo structure = queryTableStructure(tableName);
+        if (!Boolean.TRUE.equals(structure.getExist())) throw new BuzzException("表不存在: " + tableName);
+        TableColumnVo existing = structure.getColumns().stream()
+                .filter(item -> columnName.equals(item.getField())).findFirst().orElse(null);
+        if (update && existing == null) throw new BuzzException("字段不存在: " + columnName);
+        if (!update && existing != null) throw new BuzzException("字段已存在: " + columnName);
+        if (update && (Boolean.TRUE.equals(existing.getDefaultExpression())
+                || (existing.getType() != null && existing.getType().toLowerCase(Locale.ROOT).contains("unsigned"))
+                || "auto_increment".equalsIgnoreCase(existing.getExtra()) || "PRI".equals(existing.getKey()))) {
+            throw new BuzzException("主键、自增、unsigned或含复杂默认表达式的字段暂不支持修改");
+        }
+        Connection connection = DataSourceUtils.getConnection(dataSource);
+        try {
+            FlowFormDdlDialect dialect = FlowFormDdlDialect.from(connection);
+            if (update && dialect == FlowFormDdlDialect.MYSQL) {
+                String oldType = existing.getType() == null ? "" : existing.getType().toLowerCase(Locale.ROOT);
+                String extra = existing.getExtra() == null ? "" : existing.getExtra().toLowerCase(Locale.ROOT);
+                boolean unsupportedPrecision = oldType.matches("(?:timestamp|datetime|float|double)\\(.*");
+                if (unsupportedPrecision || extra.contains("on update") || extra.contains("virtual generated") || extra.contains("stored generated")) {
+                    throw new BuzzException("该字段包含时间精度、浮点精度、自动更新时间或生成表达式，暂不支持在设计器修改");
+                }
+            }
+            for (String sql : dialect.columnStatements(tableName, column, update, existing)) {
+                FlowFormSqlUtils.executeDdl(connection, sql);
             }
         } finally {
             DataSourceUtils.releaseConnection(connection, dataSource);
         }
-
-        // 使用 Hutool 的 MetaUtil 来获取表结构
-        Table tableMeta = MetaUtil.getTableMeta(dataSource, tableName);
-        if (tableMeta == null) {
-            tableInfo.setExist(false);
-            return tableInfo;
-        }
-        tableInfo.setExist(true);
-        
-        // 尝试从Hutool获取表注释
-        String tableComment = tableMeta.getComment();
-        // 如果Hutool获取不到，使用SQL查询获取
-        if (tableComment == null || tableComment.isEmpty()) {
-            tableComment = baseMapper.getTableComment(tableName);
-        }
-        tableInfo.setTableComment(tableComment);
-        
-        // getPkNames() 返回 Set<String>，需要转换为 String
-        // 通常表只有一个主键，取第一个
-        Set<String> pkNames = tableMeta.getPkNames();
-        String pkField = (pkNames != null && !pkNames.isEmpty()) ? pkNames.iterator().next() : null;
-        tableInfo.setPkField(pkField);
-        
-        // List<TableColumnVo> columns = new ArrayList<>();
-        // for (Column column : tableMeta.getColumns()) {
-        //     TableColumnVo tableColumnVo = new TableColumnVo();
-        //     tableColumnVo.setField(column.getName());
-        //     tableColumnVo.setDataType(column.getTypeName());
-        //     tableColumnVo.setComment(column.getComment());
-        //     columns.add(tableColumnVo);
-        // }
-        // tableInfo.setColumns(columns);
-
-
-        List<TableColumnVo> columns = baseMapper.getTableColumns(tableName);
-        tableInfo.setColumns(columns);
-
-        // 获取主键字段
-        // String pkField = null;
-        // for (TableColumnVo column : columns) {
-        //     if ("PRI".equalsIgnoreCase(column.getKey())) {
-        //         pkField = column.getField();
-        //         break;
-        //     }
-        // }
-        // tableInfo.setPkField(pkField);
-
-        return tableInfo;
     }
 
-    public void createColumn(CreateColumnReqVo reqVo) throws SQLException {
-        String tableName = requireManagedTableName(reqVo.getTableName());
-        TableColumnVo column = reqVo.getColumn();
-        ensureTableExists(tableName);
-        String columnName = validateMutableColumn(column);
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("ALTER TABLE ")
-                .append(FlowFormSqlUtils.quoteIdentifier(tableName, "表名"))
-                .append(" ADD COLUMN ")
-                .append(FlowFormSqlUtils.quoteIdentifier(columnName, "字段名"))
-                .append(' ')
-                .append(buildColumnDefinition(column));
-
-        FlowFormSqlUtils.executeDdl(dataSource, sb.toString());
-    }
-
-
-    public void updateColumn(CreateColumnReqVo reqVo) throws SQLException {
-        String tableName = requireManagedTableName(reqVo.getTableName());
-        TableColumnVo column = reqVo.getColumn();
-        ensureTableExists(tableName);
-        String columnName = validateMutableColumn(column);
-        StringBuilder sb = new StringBuilder();
-        sb.append("ALTER TABLE ")
-                .append(FlowFormSqlUtils.quoteIdentifier(tableName, "表名"))
-                .append(" MODIFY COLUMN ")
-                .append(FlowFormSqlUtils.quoteIdentifier(columnName, "字段名"))
-                .append(' ')
-                .append(buildColumnDefinition(column));
-        FlowFormSqlUtils.executeDdl(dataSource, sb.toString());
-    }
-
+    @Transactional(rollbackFor = Exception.class)
     public void deleteColumn(com.faber.api.flow.form.vo.req.DeleteColumnReqVo reqVo) throws SQLException {
         String tableName = requireManagedTableName(reqVo.getTableName());
         ensureTableExists(tableName);
@@ -204,10 +164,15 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         if (SYSTEM_FIELDS.contains(columnName.toLowerCase(Locale.ROOT))) {
             throw new BuzzException("系统字段不允许删除: " + columnName);
         }
-
-        String sql = "ALTER TABLE " + FlowFormSqlUtils.quoteIdentifier(tableName, "表名")
-                + " DROP COLUMN " + FlowFormSqlUtils.quoteIdentifier(columnName, "字段名");
-        FlowFormSqlUtils.executeDdl(dataSource, sql);
+        Connection connection = DataSourceUtils.getConnection(dataSource);
+        try {
+            FlowFormDdlDialect dialect = FlowFormDdlDialect.from(connection);
+            String sql = "ALTER TABLE " + dialect.quoteIdentifier(tableName, "表名")
+                    + " DROP COLUMN " + dialect.quoteIdentifier(columnName, "字段名");
+            FlowFormSqlUtils.executeDdl(connection, sql);
+        } finally {
+            DataSourceUtils.releaseConnection(connection, dataSource);
+        }
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -1056,66 +1021,12 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         if (SYSTEM_FIELDS.contains(field.toLowerCase(Locale.ROOT))) {
             throw new BuzzException("系统字段不允许修改: " + field);
         }
-        buildColumnDefinition(column);
         return field;
-    }
-
-    private String buildColumnDefinition(TableColumnVo column) {
-        String dataType = column.getDataType();
-        if (dataType == null) {
-            throw new BuzzException("字段类型不能为空");
-        }
-        dataType = dataType.toLowerCase(Locale.ROOT);
-        if (!ALLOWED_DATA_TYPES.contains(dataType)) {
-            throw new BuzzException("不支持的字段类型: " + dataType);
-        }
-
-        StringBuilder definition = new StringBuilder(dataType);
-        if (DATA_TYPES_LENGTH.contains(dataType) && column.getLength() != null) {
-            validateRange(column.getLength(), 1, 65535, "字段长度");
-            definition.append('(').append(column.getLength()).append(')');
-        } else if (DATA_TYPES_PRECISION.contains(dataType)
-                && column.getPrecision() != null && column.getScale() != null) {
-            validateRange(column.getPrecision(), 1, 65, "字段精度");
-            validateRange(column.getScale(), 0, 30, "字段小数位");
-            if (column.getScale() > column.getPrecision()) {
-                throw new BuzzException("字段小数位不能大于字段精度");
-            }
-            definition.append('(').append(column.getPrecision()).append(',')
-                    .append(column.getScale()).append(')');
-        }
-
-        String nullable = column.getNullable();
-        if (nullable == null || "YES".equalsIgnoreCase(nullable)) {
-            definition.append(" NULL");
-        } else if ("NO".equalsIgnoreCase(nullable)) {
-            definition.append(" NOT NULL");
-        } else {
-            throw new BuzzException("nullable 只能是 YES 或 NO");
-        }
-
-        if (column.getDefaultValue() != null) {
-            validateDdlText(column.getDefaultValue(), "默认值");
-            definition.append(" DEFAULT ")
-                    .append(FlowFormSqlUtils.quoteDdlLiteral(column.getDefaultValue(), "默认值"));
-        }
-        if (column.getComment() != null) {
-            validateDdlText(column.getComment(), "字段注释");
-            definition.append(" COMMENT ")
-                    .append(FlowFormSqlUtils.quoteDdlLiteral(column.getComment(), "字段注释"));
-        }
-        return definition.toString();
     }
 
     private void validateDdlText(String value, String label) {
         if (value != null && value.length() > MAX_DDL_TEXT_LENGTH) {
             throw new BuzzException(label + "长度不能超过" + MAX_DDL_TEXT_LENGTH);
-        }
-    }
-
-    private void validateRange(Integer value, int min, int max, String label) {
-        if (value == null || value < min || value > max) {
-            throw new BuzzException(label + "必须在" + min + "到" + max + "之间");
         }
     }
 

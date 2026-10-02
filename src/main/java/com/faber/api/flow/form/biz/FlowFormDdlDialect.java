@@ -6,6 +6,9 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.Objects;
+import java.math.BigDecimal;
 
 import com.faber.core.exception.BuzzException;
 import com.faber.api.flow.form.vo.ret.TableColumnVo;
@@ -30,6 +33,7 @@ enum FlowFormDdlDialect {
 
     String quoteIdentifier(String identifier, String label) {
         String safeIdentifier = FlowFormSqlUtils.requireIdentifier(identifier, label);
+        if (this == POSTGRESQL && safeIdentifier.length() > 63) throw new BuzzException(label + "长度不能超过63");
         return this == MYSQL ? "`" + safeIdentifier + "`" : "\"" + safeIdentifier + "\"";
     }
 
@@ -75,6 +79,154 @@ enum FlowFormDdlDialect {
         return List.copyOf(statements);
     }
 
+    String databaseType() {
+        return this == MYSQL ? "mysql" : "postgre";
+    }
+
+    static String normalizedType(String type) {
+        if (type == null) throw new BuzzException("字段类型不能为空");
+        return switch (type.toLowerCase(Locale.ROOT).trim()) {
+            case "character varying" -> "varchar";
+            case "character", "bpchar" -> "char";
+            case "integer", "int4" -> "int";
+            case "int8" -> "bigint";
+            case "int2" -> "smallint";
+            case "float4" -> "real";
+            case "float8" -> "double precision";
+            case "bool" -> "boolean";
+            case "timestamp without time zone" -> "timestamp";
+            default -> type.toLowerCase(Locale.ROOT).trim();
+        };
+    }
+
+    void normalizeColumn(TableColumnVo column) {
+        String type = normalizedType(column.getDataType());
+        column.setDataType(type);
+        if (!Set.of("char", "varchar", "binary", "varbinary").contains(type)) column.setLength(null);
+        if (!Set.of("decimal", "numeric").contains(type)) {
+            column.setPrecision(null);
+            column.setScale(null);
+        }
+        column.setDefaultExpression(false);
+        String value = column.getDefaultValue();
+        if (value == null) return;
+        if (this == MYSQL) {
+            if (column.getExtra() != null && column.getExtra().toLowerCase(Locale.ROOT).contains("default_generated")
+                    && !"CURRENT_TIMESTAMP".equalsIgnoreCase(value) && !"CURRENT_TIMESTAMP()".equalsIgnoreCase(value)) {
+                column.setDefaultExpression(true);
+            }
+            if (Set.of("datetime", "timestamp").contains(type) && "CURRENT_TIMESTAMP()".equalsIgnoreCase(value)) column.setDefaultValue("CURRENT_TIMESTAMP");
+            return;
+        }
+        if ("now()".equalsIgnoreCase(value) || "CURRENT_TIMESTAMP".equalsIgnoreCase(value)) {
+            if (Set.of("datetime", "timestamp").contains(type)) {
+                column.setDefaultValue("CURRENT_TIMESTAMP");
+            } else {
+                column.setDefaultExpression(true);
+            }
+        } else if (value.matches("(?s)'(?:[^']|'')*'(?:::[a-zA-Z ]+(?:\\(\\d+(?:,\\d+)?\\))?)?")) {
+            int end = value.lastIndexOf("'");
+            column.setDefaultValue(value.substring(1, end).replace("''", "'"));
+        } else if (value.matches("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+                || "true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value)) {
+            column.setDefaultValue(value);
+        } else {
+            column.setDefaultExpression(true);
+        }
+    }
+
+    List<String> columnStatements(String table, TableColumnVo column, boolean update, TableColumnVo existing) {
+        String quotedTable = quoteIdentifier(FlowFormSqlUtils.requireTableName(table), "表名");
+        String name = quoteIdentifier(column.getField(), "字段名");
+        String type = columnType(column);
+        String nullable = column.getNullable();
+        if (nullable != null && !"YES".equalsIgnoreCase(nullable) && !"NO".equalsIgnoreCase(nullable)) {
+            throw new BuzzException("nullable只能是YES或NO");
+        }
+        boolean required = "NO".equalsIgnoreCase(nullable);
+        String defaultSql = defaultSql(column);
+        String comment = column.getComment() == null ? "" : column.getComment();
+        validateText(comment, "字段注释");
+        if (this == MYSQL) {
+            String definition = type + (required ? " NOT NULL" : " NULL")
+                    + (defaultSql == null ? "" : " DEFAULT " + defaultSql)
+                    + " COMMENT " + FlowFormSqlUtils.quoteDdlLiteral(comment, "字段注释");
+            return List.of("ALTER TABLE " + quotedTable + (update ? " MODIFY COLUMN " : " ADD COLUMN ") + name + " " + definition);
+        }
+        List<String> statements = new ArrayList<>();
+        String prefix = "ALTER TABLE " + quotedTable + " ALTER COLUMN " + name;
+        if (update) {
+            // 先移除旧默认值，避免旧默认值阻止兼容的类型变更；全部语句在同一事务执行。
+            statements.add(prefix + " DROP DEFAULT");
+            if (!sameColumnType(column, existing)) statements.add(prefix + " TYPE " + type);
+            statements.add(prefix + (required ? " SET NOT NULL" : " DROP NOT NULL"));
+            if (defaultSql != null) statements.add(prefix + " SET DEFAULT " + defaultSql);
+        } else {
+            statements.add("ALTER TABLE " + quotedTable + " ADD COLUMN " + name + " " + type
+                    + (required ? " NOT NULL" : " NULL") + (defaultSql == null ? "" : " DEFAULT " + defaultSql));
+        }
+        statements.add(commentOnColumn(quotedTable, column.getField(), comment));
+        return List.copyOf(statements);
+    }
+
+    private boolean sameColumnType(TableColumnVo column, TableColumnVo existing) {
+        if (existing == null) return false;
+        String type = normalizedType(column.getDataType());
+        if (!type.equals(normalizedType(existing.getDataType()))) return false;
+        if (Set.of("varchar", "char").contains(type)) return Objects.equals(column.getLength(), existing.getLength());
+        if (Set.of("numeric", "decimal").contains(type)) return Objects.equals(column.getPrecision(), existing.getPrecision())
+                && Objects.equals(column.getScale(), existing.getScale());
+        return true;
+    }
+
+    private String columnType(TableColumnVo column) {
+        String type = normalizedType(column.getDataType());
+        Set<String> allowed = this == MYSQL
+                ? Set.of("varchar", "char", "varbinary", "binary", "int", "bigint", "smallint", "tinyint", "mediumint", "decimal", "numeric", "float", "double", "text", "date", "datetime", "timestamp", "json")
+                : Set.of("varchar", "char", "int", "bigint", "smallint", "numeric", "decimal", "real", "double precision", "text", "date", "timestamp", "boolean", "json", "jsonb");
+        if (!allowed.contains(type)) throw new BuzzException("当前数据库不支持字段类型: " + type);
+        if (Set.of("char", "varchar", "binary", "varbinary").contains(type)) {
+            range(column.getLength(), 1, 65535, "字段长度");
+            return type + "(" + column.getLength() + ")";
+        }
+        if (Set.of("decimal", "numeric").contains(type)) {
+            range(column.getPrecision(), 1, this == MYSQL ? 65 : 1000, "字段精度");
+            range(column.getScale(), 0, this == MYSQL ? 30 : 1000, "字段小数位");
+            if (column.getScale() > column.getPrecision()) throw new BuzzException("小数位不能大于字段精度");
+            return type + "(" + column.getPrecision() + "," + column.getScale() + ")";
+        }
+        return type;
+    }
+
+    private String defaultSql(TableColumnVo column) {
+        String value = column.getDefaultValue();
+        if (value == null) return null;
+        validateText(value, "默认值");
+        String type = normalizedType(column.getDataType());
+        if (this == MYSQL && Set.of("text", "json").contains(type)) throw new BuzzException("MySQL TEXT/JSON字段暂不支持默认值");
+        if (Set.of("datetime", "timestamp").contains(type) && "CURRENT_TIMESTAMP".equalsIgnoreCase(value)) return "CURRENT_TIMESTAMP";
+        if (Set.of("int", "bigint", "smallint", "tinyint", "mediumint", "decimal", "numeric", "float", "double", "real", "double precision").contains(type)) {
+            if (!value.matches("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?")) throw new BuzzException("数字字段默认值必须是数字");
+            BigDecimal number = new BigDecimal(value);
+            if (Set.of("int", "bigint", "smallint", "tinyint", "mediumint").contains(type) && number.stripTrailingZeros().scale() > 0) throw new BuzzException("整数字段默认值必须是整数");
+            return value;
+        }
+        if ("boolean".equals(type)) {
+            if ("true".equalsIgnoreCase(value) || "1".equals(value)) return "TRUE";
+            if ("false".equalsIgnoreCase(value) || "0".equals(value)) return "FALSE";
+            throw new BuzzException("布尔字段默认值必须是true或false");
+        }
+        return this == MYSQL ? FlowFormSqlUtils.quoteDdlLiteral(value, "默认值") : FlowFormSqlUtils.quotePostgresDdlLiteral(value, "默认值");
+    }
+
+    private static void range(Integer value, int min, int max, String label) {
+        if (value == null || value < min || value > max) throw new BuzzException(label + "必须在" + min + "到" + max + "之间");
+    }
+
+    private static void validateText(String value, String label) {
+        if (value.length() > 255) throw new BuzzException(label + "长度不能超过255");
+    }
+
     private String commentOnColumn(String quotedTableName, String columnName, String comment) {
         return "COMMENT ON COLUMN " + quotedTableName + "." + quoteIdentifier(columnName, "字段名") + " IS " +
                 FlowFormSqlUtils.quotePostgresDdlLiteral(comment, "字段注释");
@@ -86,6 +238,7 @@ enum FlowFormDdlDialect {
         String catalog = conn.getCatalog();
         TableInfoVo info = new TableInfoVo();
         info.setTableName(table);
+        info.setDatabaseType(FlowFormDdlDialect.from(conn).databaseType());
         info.setExist(false);
         try (ResultSet tables = conn.getMetaData().getTables(catalog, schema, table, new String[] { "TABLE" })) {
             while (tables.next()) {
