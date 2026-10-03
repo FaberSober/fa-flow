@@ -73,6 +73,30 @@ public class FlowFormQueryUtilsTest {
                 check(rejected && sql.isEmpty() && params.isEmpty(), "invalid range rejected before adding SQL");
             }
         }
+        Map<String, Object> dateConfig = Map.of("query", Map.of("columns", List.of(
+                Map.of("field", "crt_time", "queryType", "date_range", "multiple", true))));
+        for (String cast : List.of("CHAR", "TEXT")) {
+            StringBuilder sql = new StringBuilder();
+            List<Object> params = new ArrayList<>();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.crt_time", cast, dateConfig, "crt_time", List.of("2026-10-01", "2026-10-01"));
+            check(sql.toString().equals(" AND t.crt_time >= ? AND t.crt_time < ?"), "date comparison without text cast");
+            check(params.equals(List.of(java.sql.Date.valueOf("2026-10-01"), java.sql.Date.valueOf("2026-10-02"))), "same day includes whole day");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.crt_time", cast, dateConfig, "crt_time", ",2024-02-29");
+            check(sql.toString().equals(" AND t.crt_time < ?") && params.equals(List.of(java.sql.Date.valueOf("2024-03-01"))), "leap day end only");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.crt_time", cast, dateConfig, "crt_time", "2026-10-01,");
+            check(sql.toString().equals(" AND t.crt_time >= ?") && params.size() == 1, "start only");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.crt_time", cast, dateConfig, "crt_time", java.util.Arrays.asList(null, null));
+            check(sql.isEmpty() && params.isEmpty(), "cleared date range");
+            for (String invalid : List.of("2026-10-02,2026-10-01", "2026-02-30,", "bad,", "2026-01-01,2026-01-02,2026-01-03")) {
+                boolean rejected = false;
+                try { FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.crt_time", cast, dateConfig, "crt_time", invalid); }
+                catch (com.faber.core.exception.BuzzException e) { rejected = true; }
+                check(rejected && sql.isEmpty() && params.isEmpty(), "invalid date range rejected before SQL");
+            }
+        }
         System.out.println("FlowFormQueryUtils checks passed for MySQL/PostgreSQL predicates");
     }
 

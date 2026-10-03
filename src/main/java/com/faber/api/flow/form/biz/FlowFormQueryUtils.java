@@ -1,6 +1,8 @@
 package com.faber.api.flow.form.biz;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.DateTimeException;
 import java.util.List;
 import com.faber.core.exception.BuzzException;
 import java.util.Map;
@@ -37,6 +39,17 @@ final class FlowFormQueryUtils {
             if (max != null) { sql.append(" AND ").append(fieldExpression).append(" <= ?"); params.add(max); }
             return;
         }
+        if ("date_range".equals(type)) {
+            List<?> bounds = value instanceof List<?> items ? items : java.util.Arrays.asList(String.valueOf(value).split("[,，]", -1));
+            if (bounds.size() > 2) throw new BuzzException("日期区间最多填写开始日期和结束日期");
+            LocalDate start = dateBound(bounds.isEmpty() ? null : bounds.get(0));
+            LocalDate end = dateBound(bounds.size() < 2 ? null : bounds.get(1));
+            if (start != null && end != null && start.isAfter(end)) throw new BuzzException("开始日期不能晚于结束日期");
+            // 上界采用次日零点之前，包含结束当天的全部时间和小数秒。
+            if (start != null) { sql.append(" AND ").append(fieldExpression).append(" >= ?"); params.add(java.sql.Date.valueOf(start)); }
+            if (end != null) { sql.append(" AND ").append(fieldExpression).append(" < ?"); params.add(java.sql.Date.valueOf(end.plusDays(1))); }
+            return;
+        }
         boolean multiple = "in".equals(type) || Boolean.TRUE.equals(config.get("multiple"));
         if (!multiple) {
             appendTextCondition(sql, params, fieldExpression, castType, "eq".equals(type), String.valueOf(value));
@@ -70,6 +83,12 @@ final class FlowFormQueryUtils {
         if (value == null || String.valueOf(value).isBlank()) return null;
         try { return new BigDecimal(String.valueOf(value).trim()); }
         catch (NumberFormatException e) { throw new BuzzException("数值区间请输入有效数字"); }
+    }
+
+    private static LocalDate dateBound(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) return null;
+        try { return LocalDate.parse(String.valueOf(value).trim()); }
+        catch (DateTimeException e) { throw new BuzzException("日期区间请使用有效的 YYYY-MM-DD 日期"); }
     }
 
     // 字段表达式及方言来自调用方，业务值始终使用参数绑定。
