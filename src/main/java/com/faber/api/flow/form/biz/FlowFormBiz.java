@@ -681,8 +681,8 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 } finally {
                     DataSourceUtils.releaseConnection(dialectConnection, dataSource);
                 }
-                FlowFormQueryUtils.appendTextCondition(whereSql, params, "t." + quoteColumn(field), castType,
-                        FlowFormQueryUtils.isExactQuery(flowForm.getTableConfig(), field), textValue);
+                FlowFormQueryUtils.appendConfiguredCondition(whereSql, params, "t." + quoteColumn(field), castType,
+                        flowForm.getTableConfig(), field, value);
             }
         }
 

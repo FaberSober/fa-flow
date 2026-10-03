@@ -25,6 +25,30 @@ public class FlowFormQueryUtilsTest {
             check(sql.toString().endsWith(") LIKE ?"), "like predicate");
             check(params.equals(List.of("%test%")), "like bound value");
         }
+        for (String cast : List.of("CHAR", "TEXT")) {
+            for (String type : List.of("in", "eq", "like")) {
+                Map<String, Object> multipleConfig = Map.of("query", Map.of("columns", List.of(
+                        Map.of("field", "order_no", "queryType", type, "multiple", true))));
+                StringBuilder sql = new StringBuilder();
+                List<Object> params = new ArrayList<>();
+                FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.order_no", cast, multipleConfig,
+                        "order_no", List.of("A", "B", "A"));
+                check(!sql.toString().contains("A" + "'"), "parameter binding");
+                if ("like".equals(type)) {
+                    check(sql.toString().equals(" AND (CAST(t.order_no AS " + cast + ") LIKE ? OR CAST(t.order_no AS " + cast + ") LIKE ?)"), "multiple like predicate");
+                    check(params.equals(List.of("%A%", "%B%")), "multiple like values");
+                } else {
+                    check(sql.toString().equals(" AND CAST(t.order_no AS " + cast + ") IN (?,?)"), "multiple exact predicate");
+                    check(params.equals(List.of("A", "B")), "multiple exact values");
+                }
+                sql.setLength(0);
+                params.clear();
+                FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.order_no", cast, multipleConfig, "order_no", List.of());
+                check(sql.isEmpty() && params.isEmpty(), "empty selection does not filter");
+                FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.order_no", cast, multipleConfig, "order_no", "A,B，A");
+                check(params.size() == 2, "legacy comma defaults");
+            }
+        }
         System.out.println("FlowFormQueryUtils checks passed for MySQL/PostgreSQL predicates");
     }
 
