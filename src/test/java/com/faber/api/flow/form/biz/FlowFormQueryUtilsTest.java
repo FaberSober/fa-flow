@@ -49,6 +49,30 @@ public class FlowFormQueryUtilsTest {
                 check(params.size() == 2, "legacy comma defaults");
             }
         }
+        Map<String, Object> rangeConfig = Map.of("query", Map.of("columns", List.of(
+                Map.of("field", "amount", "queryType", "number_range", "multiple", true))));
+        for (String cast : List.of("CHAR", "TEXT")) {
+            StringBuilder sql = new StringBuilder();
+            List<Object> params = new ArrayList<>();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.amount", cast, rangeConfig, "amount", List.of("0", "10.50"));
+            check(sql.toString().equals(" AND t.amount >= ? AND t.amount <= ?"), "numeric range without text casting");
+            check(params.equals(List.of(new java.math.BigDecimal("0"), new java.math.BigDecimal("10.50"))), "decimal binding");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.amount", cast, rangeConfig, "amount", ",5");
+            check(sql.toString().equals(" AND t.amount <= ?") && params.size() == 1, "upper bound only");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.amount", cast, rangeConfig, "amount", "-1,");
+            check(sql.toString().equals(" AND t.amount >= ?"), "lower bound only");
+            sql.setLength(0); params.clear();
+            FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.amount", cast, rangeConfig, "amount", java.util.Arrays.asList(null, null));
+            check(sql.isEmpty() && params.isEmpty(), "cleared range");
+            for (String invalid : List.of("10,1", "abc,2", "1,2,3")) {
+                boolean rejected = false;
+                try { FlowFormQueryUtils.appendConfiguredCondition(sql, params, "t.amount", cast, rangeConfig, "amount", invalid); }
+                catch (com.faber.core.exception.BuzzException e) { rejected = true; }
+                check(rejected && sql.isEmpty() && params.isEmpty(), "invalid range rejected before adding SQL");
+            }
+        }
         System.out.println("FlowFormQueryUtils checks passed for MySQL/PostgreSQL predicates");
     }
 

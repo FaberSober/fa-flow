@@ -1,6 +1,8 @@
 package com.faber.api.flow.form.biz;
 
+import java.math.BigDecimal;
 import java.util.List;
+import com.faber.core.exception.BuzzException;
 import java.util.Map;
 
 /** 使用已保存的查询配置，兼容未配置查询方式的旧表单。 */
@@ -25,6 +27,16 @@ final class FlowFormQueryUtils {
                                           String castType, Map<String, Object> tableConfig, String field, Object value) {
         Map<?, ?> config = getQueryConfig(tableConfig, field);
         String type = String.valueOf(config.get("queryType"));
+        if ("number_range".equals(type)) {
+            List<?> bounds = value instanceof List<?> items ? items : java.util.Arrays.asList(String.valueOf(value).split("[,，]", -1));
+            if (bounds.size() > 2) throw new BuzzException("数值区间最多填写最小值和最大值");
+            BigDecimal min = numericBound(bounds.isEmpty() ? null : bounds.get(0));
+            BigDecimal max = numericBound(bounds.size() < 2 ? null : bounds.get(1));
+            if (min != null && max != null && min.compareTo(max) > 0) throw new BuzzException("最小值不能大于最大值");
+            if (min != null) { sql.append(" AND ").append(fieldExpression).append(" >= ?"); params.add(min); }
+            if (max != null) { sql.append(" AND ").append(fieldExpression).append(" <= ?"); params.add(max); }
+            return;
+        }
         boolean multiple = "in".equals(type) || Boolean.TRUE.equals(config.get("multiple"));
         if (!multiple) {
             appendTextCondition(sql, params, fieldExpression, castType, "eq".equals(type), String.valueOf(value));
@@ -52,6 +64,12 @@ final class FlowFormQueryUtils {
             }
             sql.append(")");
         }
+    }
+
+    private static BigDecimal numericBound(Object value) {
+        if (value == null || String.valueOf(value).isBlank()) return null;
+        try { return new BigDecimal(String.valueOf(value).trim()); }
+        catch (NumberFormatException e) { throw new BuzzException("数值区间请输入有效数字"); }
     }
 
     // 字段表达式及方言来自调用方，业务值始终使用参数绑定。
