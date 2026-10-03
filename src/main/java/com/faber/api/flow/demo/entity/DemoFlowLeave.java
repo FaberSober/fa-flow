@@ -6,7 +6,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import com.faber.core.annotation.FaModalName;
-import com.faber.core.bean.BaseDelEntity;
+import com.faber.core.bean.BaseTnDelEntity;
 import lombok.Data;
 
 import java.util.Date;
@@ -22,7 +22,7 @@ import java.math.BigDecimal;
 @FaModalName(name = "DEMO-请假流程")
 @TableName("demo_flow_leave")
 @Data
-public class DemoFlowLeave extends BaseDelEntity {
+public class DemoFlowLeave extends BaseTnDelEntity {
 
     @ColumnWidth(8)
     @ExcelProperty("ID")
@@ -49,8 +49,5 @@ public class DemoFlowLeave extends BaseDelEntity {
 
     @ExcelProperty("结束时间")
     private Date leaveEndTime;
-
-    @ExcelProperty("租户ID")
-    private String tenantId;
 
 }
