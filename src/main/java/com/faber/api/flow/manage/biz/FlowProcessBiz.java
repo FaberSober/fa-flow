@@ -318,10 +318,7 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
         if (flowForm.getType() != FlowFormTypeEnum.DESIGN) {
             throw new BuzzException("流程表单类型不支持启动自定义流程，formId=" + flowProcess.getFormId());
         }
-        if (flowForm.getFlowProcessId() != null
-                && !Objects.equals(flowForm.getFlowProcessId(), flowProcess.getId())) {
-            throw new BuzzException("流程表单已关联其他流程，formId=" + flowProcess.getFormId());
-        }
+        // 流程侧 formId 是唯一配置依据；表单侧旧 flowProcessId 不再限制复用。
         if (flowForm.getConfig() == null) {
             throw new BuzzException("流程表单配置不能为空，formId=" + flowProcess.getFormId());
         }
