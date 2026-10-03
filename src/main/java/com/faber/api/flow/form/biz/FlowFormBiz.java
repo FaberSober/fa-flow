@@ -663,7 +663,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
             for (Map.Entry<String, Object> entry : query.getQuery().entrySet()) {
                 String key = entry.getKey();
                 Object value = entry.getValue();
-                if (value == null) continue;
+                if (value == null || (value instanceof String text && text.isBlank())) continue;
                 String field = normalizeQueryField(key);
                 if (!readableFields.contains(field.toLowerCase(Locale.ROOT))) {
                     throw new BuzzException("不允许查询字段: " + key);
@@ -681,10 +681,8 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 } finally {
                     DataSourceUtils.releaseConnection(dialectConnection, dataSource);
                 }
-                whereSql.append(" AND CAST(t.")
-                        .append(quoteColumn(field))
-                        .append(" AS ").append(castType).append(") LIKE ?");
-                params.add("%" + textValue + "%");
+                FlowFormQueryUtils.appendTextCondition(whereSql, params, "t." + quoteColumn(field), castType,
+                        FlowFormQueryUtils.isExactQuery(flowForm.getTableConfig(), field), textValue);
             }
         }
 
