@@ -234,6 +234,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 ensureTenantColumn(tableConfig.getTableName());
                 requireConfiguredField(tableConfig, fkField, "子表外键字段");
 
+                Object foreignKeyValue = foreignKeyValue(tableConfig, fkField, mainTableId);
                 // 跳过空数据
                 if (tableData == null || tableData.isEmpty()) {
                     // 删除所有子表数据（没有传数据表示清空）
@@ -242,7 +243,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                             .append(" SET `deleted` = ?, `upd_time` = CURRENT_TIMESTAMP, `upd_user` = ?")
                             .append(" WHERE ").append(quoteColumn(fkField)).append(" = ? AND `deleted` = ?");
                     List<Object> clearParams = new ArrayList<>(
-                            Arrays.asList(true, getCurrentUserId(), mainTableId, false));
+                            Arrays.asList(true, getCurrentUserId(), foreignKeyValue, false));
                     appendTenantPredicate(clearSql, clearParams, quoteColumn("tenant_id"), tenantId);
                     FlowFormSqlUtils.executeUpdate(conn,
                             clearSql.toString(), clearParams);
@@ -280,14 +281,14 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                 // 在执行批量清理前先校验所有待更新子表 ID 的主表和租户归属，避免越权 ID
                 // 导致当前主表的已有数据被误清理。
                 validateChildRecordOwnership(conn, tableConfig.getTableName(), fkField,
-                        mainTableId, tenantId, updateIds);
+                        foreignKeyValue, tenantId, updateIds);
 
                 // 1. 删除不在更新列表中的数据
                 StringBuilder deleteSql = new StringBuilder()
                         .append("UPDATE ").append(quoteTable(tableConfig.getTableName()))
                         .append(" SET `deleted` = ?, `upd_time` = CURRENT_TIMESTAMP, `upd_user` = ?")
                         .append(" WHERE ").append(quoteColumn(fkField)).append(" = ?");
-                List<Object> deleteParams = new ArrayList<>(Arrays.asList(true, getCurrentUserId(), mainTableId));
+                List<Object> deleteParams = new ArrayList<>(Arrays.asList(true, getCurrentUserId(), foreignKeyValue));
                 if (!updateIds.isEmpty()) {
                     deleteSql.append(" AND `id` NOT IN (")
                             .append(FlowFormSqlUtils.placeholders(updateIds.size()))
@@ -306,7 +307,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
                 // 3. 插入新数据
                 for (Map<String, Object> rowData : insertDataList) {
-                    rowData.put(fkField, mainTableId);
+                    rowData.put(fkField, foreignKeyValue);
                     save(conn, tableConfig, rowData, tenantId);
                 }
             }
@@ -370,7 +371,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                         throw new BuzzException("子表数据行不能为空");
                     }
                     rowData.entrySet().removeIf(entry -> entry.getKey() != null && entry.getKey().startsWith("_"));
-                    rowData.put(fkField, mainTableId);
+                    rowData.put(fkField, foreignKeyValue(tableConfig, fkField, mainTableId));
                     save(conn, tableConfig, rowData, tenantId);
                 }
             }
@@ -526,7 +527,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
         }
         if (parentField != null) {
             sql.append(" AND ").append(quoteColumn(parentField)).append(" = ?");
-            params.add(parentId);
+            params.add(foreignKeyValue(tableConfig, parentField, parentId));
         }
         int affectedRows = FlowFormSqlUtils.executeUpdate(conn, sql.toString(), params);
 
@@ -792,7 +793,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
                         .append(" WHERE ").append(quoteColumn(fkField))
                         .append(" = ? AND ").append(quoteColumn("deleted"))
                         .append(" = false");
-                List<Object> subParams = new ArrayList<>(List.of(recordId));
+                List<Object> subParams = new ArrayList<>(List.of(foreignKeyValue(tableConfig, fkField, recordId)));
                 appendTenantPredicate(subSql, subParams, quoteColumn("tenant_id"), tenantId);
                 List<Map<String, Object>> subList = FlowFormSqlUtils.queryForMaps(
                         conn, subSql.toString(), subParams);
@@ -989,7 +990,7 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
     }
 
     private void validateChildRecordOwnership(Connection conn, String tableName, String fkField,
-                                               Long parentId, String tenantId, List<Long> recordIds)
+                                               Object parentId, String tenantId, List<Long> recordIds)
             throws SQLException {
         if (recordIds.isEmpty()) {
             return;
@@ -1039,6 +1040,23 @@ public class FlowFormBiz extends BaseBiz<FlowFormMapper,FlowForm> implements FaF
 
     private String quoteColumn(String columnName) {
         return FlowFormSqlUtils.quoteIdentifier(columnName, "字段名");
+    }
+
+    /** 子表外键可能是字符字段，JDBC 比较参数必须与配置的字段类型一致。 */
+    private Object foreignKeyValue(FlowFormDataConfig.Table tableConfig, String field, Long parentId) {
+        FlowFormDataConfig.Column column = tableConfig.getColumns().stream()
+                .filter(item -> item != null && field.equalsIgnoreCase(item.getField()))
+                .findFirst()
+                .orElseThrow(() -> new BuzzException("子表外键字段未包含在表单配置中: " + field));
+        String type = column.getDataType();
+        if (type == null || type.isBlank()) type = column.getType();
+        if (type != null) {
+            String normalizedType = type.toLowerCase(Locale.ROOT);
+            if (normalizedType.contains("char") || normalizedType.contains("text")) {
+                return String.valueOf(parentId);
+            }
+        }
+        return parentId;
     }
 
     private Object dynamicColumnValue(FlowFormDataConfig.Column column, Object value) {
