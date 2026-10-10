@@ -10,6 +10,7 @@ import java.util.stream.Collectors;
 import org.redisson.api.RLock;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -80,6 +81,7 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public boolean save(FlowProcess entity) {
         // set default modelContent
         // JSONObject model = new JSONObject("""
@@ -122,10 +124,54 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
 
         // entity.setModelContent(model.toString());
 
+        validateFormBinding(entity);
         return super.save(entity);
     }
 
-    @Transactional(rollbackFor = Exception.class)
+    @Override
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
+    public boolean updateById(FlowProcess entity) {
+        FlowProcess stored = lambdaQuery().eq(FlowProcess::getId, entity.getId()).last("FOR UPDATE").one();
+        if (stored == null) throw new BuzzException("流程定义不存在");
+        if (stored.getProcessId() != null && stored.getFormType() == FlowProcessFormTypeEnum.CUSTOM
+                && entity.getFormType() != null && entity.getFormType() != FlowProcessFormTypeEnum.CUSTOM) {
+            throw new BuzzException("已发布的自定义流程只能重新关联自定义表单，不能改变表单类型，以保留历史审批入口");
+        }
+        // CRUD 更新可省略字段，按实际将要保存的绑定进行检查。
+        FlowProcess binding = new FlowProcess();
+        binding.setId(stored.getId());
+        binding.setFormType(entity.getFormType() == null ? stored.getFormType() : entity.getFormType());
+        binding.setFormId(entity.getFormId() == null ? stored.getFormId() : entity.getFormId());
+        validateFormBinding(binding);
+        return super.updateById(entity);
+    }
+
+    private void validateFormBinding(FlowProcess process) {
+        if (process.getFormType() != FlowProcessFormTypeEnum.CUSTOM) return;
+        if (process.getFormId() == null) throw new BuzzException("自定义流程表单 ID 不能为空");
+        // 锁定表单行直到事务提交，串行化不同流程对同一表单的绑定。
+        FlowForm form = flowFormBiz.lambdaQuery().eq(FlowForm::getId, process.getFormId()).last("FOR UPDATE").one();
+        if (form == null) throw new BuzzException("流程表单不存在");
+        List<FlowProcess> bindings = lambdaQuery()
+                .eq(FlowProcess::getFormType, FlowProcessFormTypeEnum.CUSTOM)
+                .eq(FlowProcess::getFormId, process.getFormId()).list();
+        for (FlowProcess bound : bindings) {
+            if (!Objects.equals(bound.getId(), process.getId())) {
+                throw new BuzzException("该表单已关联流程“" + bound.getProcessName()
+                        + "”，一张表单只能关联一个流程；请为其他用途创建独立申请表单并重新关联");
+            }
+        }
+        if (form.getFlowProcessId() != null && !Objects.equals(form.getFlowProcessId(), process.getId())) {
+            FlowProcess legacy = getById(form.getFlowProcessId());
+            // 已明确迁移到其他表单的旧引用不再占用当前表单，也不改写历史数据。
+            if (legacy != null && legacy.getFormType() == FlowProcessFormTypeEnum.CUSTOM
+                    && (legacy.getFormId() == null || Objects.equals(legacy.getFormId(), form.getId()))) {
+                throw new BuzzException("表单存在旧流程绑定，请先明确原流程的表单关联后再配置");
+            }
+        }
+    }
+
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public FlowProcess publish(FlowProcess request) {
         if (request == null || request.getId() == null) {
             throw new BuzzException("流程定义 ID 不能为空");
@@ -137,10 +183,11 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
         boolean locked = acquireLock(lock, "发布流程");
         try {
             // 只使用服务端已保存的定义，避免客户端覆盖 processId、状态或模型字段。
-            FlowProcess flowProcess = this.getById(request.getId());
+            FlowProcess flowProcess = lambdaQuery().eq(FlowProcess::getId, request.getId()).last("FOR UPDATE").one();
             if (flowProcess == null) {
                 throw new BuzzException("流程定义不存在，id=" + request.getId());
             }
+            validateFormBinding(flowProcess);
             validateFlowProcess(flowProcess);
 
             FlwProcess deployedProcess = findEngineProcess(flowProcess.getProcessId());
@@ -318,7 +365,7 @@ public class FlowProcessBiz extends BaseBiz<FlowProcessMapper, FlowProcess> {
         if (flowForm.getType() != FlowFormTypeEnum.DESIGN) {
             throw new BuzzException("流程表单类型不支持启动自定义流程，formId=" + flowProcess.getFormId());
         }
-        // 流程侧 formId 是唯一配置依据；表单侧旧 flowProcessId 不再限制复用。
+        // 启动及历史办理不检查旧多流程冲突；绑定约束由保存和发布入口处理。
         if (flowForm.getConfig() == null) {
             throw new BuzzException("流程表单配置不能为空，formId=" + flowProcess.getFormId());
         }
